@@ -1,0 +1,28 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/sqlite/*.db
+data/logs/*
+data/cache/*
+data/history/*
+
+# Knowledge / generated artifacts
+data/knowledge/index/
+data/knowledge/processed/
+
+# Raw documents / assets
+data/knowledge/inbox/images/
+data/knowledge/inbox/pdf/
+*.png
+*.jpg
+*.jpeg
+*.pdf
+
+# Local model/runtime dirs
+torch/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
