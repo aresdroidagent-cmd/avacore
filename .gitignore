@@ -21,8 +21,13 @@ data/knowledge/inbox/pdf/
 
 # Local model/runtime dirs
 torch/
+torch
 
 # Editor / OS
 .DS_Store
 .vscode/
 .idea/
+
+# Packaging / local artifacts
+avacore.egg-info/
+torch/
