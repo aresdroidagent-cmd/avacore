@@ -1,4 +1,8 @@
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 import re
 from collections import defaultdict
 
@@ -6,7 +10,10 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from avacore.config.settings import settings
-from avacore.config.personality_loader import load_personality_json_text, load_personality_manager
+from avacore.config.personality_loader import (
+    load_personality_json_text,
+    load_personality_manager,
+)
 from avacore.core.dto import HealthStatus
 from avacore.core.prompts import looks_like_code_request
 from avacore.memory.sqlite_store import SQLiteStore
@@ -20,9 +27,35 @@ from avacore.tools.weather_fetch import fetch_weather
 from avacore.tools.rss_fetch import fetch_feeds
 from avacore.mail.service import MailService
 from avacore.vision.describe import describe_image_with_smolvlm, detect_image_mode
+from avacore.system.ollama_runtime import start_ollama_server
+from avacore.system.ollama_runtime import is_port_open
 
 
-app = FastAPI(title="AvaCore")
+_ollama_process = None
+
+
+def ensure_ollama_runtime() -> None:
+    global _ollama_process
+
+    if not settings.ollama_autostart:
+        return
+
+    if _ollama_process is None:
+        _ollama_process = start_ollama_server(
+            host=settings.ollama_host,
+            port=settings.ollama_port,
+            startup_timeout=settings.ollama_startup_timeout,
+            log_file=settings.ollama_runtime_log,
+        )
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    ensure_ollama_runtime()
+    yield
+
+
+app = FastAPI(title="AvaCore", lifespan=lifespan)
 
 store = SQLiteStore(settings.db_path)
 backend = OllamaBackend(
@@ -110,14 +143,11 @@ class WebAskRequest(BaseModel):
     url: str
     question: str
 
+
 class VisionDescribeRequest(BaseModel):
     image_path: str
     mode: str | None = None
     ocr_text: str = ""
-
-class KnowledgePageRequest(BaseModel):
-    document: str
-    page: int
 
 
 def load_active_personality_profile():
@@ -126,7 +156,10 @@ def load_active_personality_profile():
 
 
 def select_rag_hits(raw_hits: list[dict]) -> list[dict]:
-    filtered = [hit for hit in raw_hits if float(hit.get("score", 0.0)) >= settings.rag_score_threshold]
+    filtered = [
+        hit for hit in raw_hits
+        if float(hit.get("score", 0.0)) >= settings.rag_score_threshold
+    ]
     if not filtered:
         return []
 
@@ -174,7 +207,10 @@ def format_rag_sources(rag_hits: list[dict]) -> str:
     return "\n\nQuellen:\n" + "\n".join(lines)
 
 
-def build_system_prompt(memory_scope: str | None = None, rag_hits: list[dict] | None = None) -> str:
+def build_system_prompt(
+    memory_scope: str | None = None,
+    rag_hits: list[dict] | None = None,
+) -> str:
     profile = load_active_personality_profile()
     base = personality_manager.render_system_prompt(profile)
 
@@ -238,11 +274,11 @@ def build_feed_digest(items: list[dict], label: str) -> str:
         f"Keine Einleitung, kein Marketing-Ton."
     )
 
+    ensure_ollama_runtime()
     messages = [
         {"role": "system", "content": digest_prompt},
         {"role": "user", "content": "\n\n---\n\n".join(lines)[:12000]},
     ]
-
     answer = backend.chat(messages)
 
     source_lines = []
@@ -260,8 +296,6 @@ def build_feed_digest(items: list[dict], label: str) -> str:
         answer = answer.rstrip() + "\n\nQuellen:\n" + "\n".join(source_lines[:5])
 
     return answer
-
-
 
 
 def extract_document_page_request(user_text: str) -> tuple[str | None, int | None]:
@@ -369,6 +403,7 @@ def explain_document_page(document_query: str, page: int) -> tuple[dict | None, 
         f"{context}"
     )
 
+    ensure_ollama_runtime()
     answer = backend.chat(
         [
             {"role": "system", "content": system_prompt},
@@ -376,8 +411,11 @@ def explain_document_page(document_query: str, page: int) -> tuple[dict | None, 
         ]
     )
     return {"document": doc, "page": page, "answer": answer}, None
+
+
 @app.get("/health", response_model=HealthStatus)
 def health() -> HealthStatus:
+    ensure_ollama_runtime()
     return HealthStatus(
         ok=True,
         model=settings.ollama_model,
@@ -389,7 +427,13 @@ def health() -> HealthStatus:
 
 @app.get("/model")
 def model() -> dict:
-    return {"model": settings.ollama_model, "profile": settings.profile_name}
+    return {
+        "model": settings.ollama_model,
+        "profile": settings.profile_name,
+        "ollama_autostart": settings.ollama_autostart,
+        "ollama_host": settings.ollama_host,
+        "ollama_port": settings.ollama_port,
+    }
 
 
 @app.get("/personality")
@@ -462,6 +506,7 @@ def knowledge_search(q: str, top_k: int | None = None) -> dict:
     selected = select_rag_hits(raw_results)
     return {"items": selected}
 
+
 @app.get("/knowledge/documents")
 def knowledge_documents(q: str = "", limit: int = 20) -> dict:
     items = store.find_knowledge_documents_by_title(q, limit=limit)
@@ -492,75 +537,23 @@ def knowledge_page(payload: KnowledgePageRequest) -> dict:
 
 @app.post("/knowledge/explain_page")
 def knowledge_explain_page(payload: KnowledgePageRequest) -> dict:
-    docs = store.find_knowledge_documents_by_title(payload.document, limit=5)
-    if not docs:
-        raise HTTPException(status_code=404, detail="document not found")
-
-    doc = docs[0]
-    chunks = store.get_knowledge_chunks_for_document_page(doc["id"], payload.page)
-    images = store.get_knowledge_images_for_document_page(doc["id"], payload.page)
-
-    if not chunks and not images:
-        raise HTTPException(status_code=404, detail="page not found or empty")
-
-    text_blocks = []
-    for chunk in chunks:
-        content = (chunk.get("content") or "").strip()
-        if content:
-            text_blocks.append(content)
-
-    image_blocks = []
-    for image in images:
-        caption = (image.get("caption") or "").strip()
-        ocr_text = (image.get("ocr_text") or "").strip()
-
-        parts = []
-        if caption:
-            parts.append(f"Bildbeschreibung: {caption}")
-        if ocr_text:
-            parts.append(f"OCR: {ocr_text}")
-
-        if parts:
-            image_blocks.append("\n".join(parts))
-
-    context_parts = []
-    if text_blocks:
-        context_parts.append("Seitentext:\n" + "\n\n".join(text_blocks[:20]))
-    if image_blocks:
-        context_parts.append("Bilder der Seite:\n" + "\n\n".join(image_blocks[:20]))
-
-    context = "\n\n".join(context_parts)[:16000]
-
-    system_prompt = (
-        "Du hast direkten Zugriff auf eine konkrete Dokumentseite. "
-        "Erkläre die Seite sachlich und präzise. "
-        "Berücksichtige sowohl Text als auch Bildbeschreibungen. "
-        "Wenn die Seite eine Montageanleitung zeigt, benenne Bauteile, Handaktionen und wahrscheinliche Montageschritte. "
-        "Wenn Unsicherheiten bestehen, sage das klar."
-    )
-
-    user_prompt = (
-        f"Dokument: {doc['title']}\n"
-        f"Seite: {payload.page}\n\n"
-        f"{context}"
-    )
-
     try:
-        answer = backend.chat(
-            [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ]
-        )
+        explained, error = explain_document_page(payload.document, payload.page)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    if explained is None:
+        if error == "document not found":
+            raise HTTPException(status_code=404, detail="document not found")
+        raise HTTPException(status_code=404, detail="page not found or empty")
+
     return {
         "ok": True,
-        "document": doc,
-        "page": payload.page,
-        "answer": answer,
+        "document": explained["document"],
+        "page": explained["page"],
+        "answer": explained["answer"],
     }
+
 
 @app.post("/mail/send")
 def mail_send(payload: MailSendRequest) -> dict:
@@ -649,16 +642,15 @@ def tools_weather(payload: WeatherRequest) -> dict:
 
     return {"ok": True, "weather": data}
 
+
 @app.post("/vision/detect_mode")
 def vision_detect_mode(payload: VisionDescribeRequest) -> dict:
-    from pathlib import Path
     mode = detect_image_mode(Path(payload.image_path), ocr_text=payload.ocr_text)
     return {"ok": True, "mode": mode}
 
 
 @app.post("/vision/describe_image")
 def vision_describe_image(payload: VisionDescribeRequest) -> dict:
-    from pathlib import Path
     try:
         caption = describe_image_with_smolvlm(
             Path(payload.image_path),
@@ -669,107 +661,6 @@ def vision_describe_image(payload: VisionDescribeRequest) -> dict:
         raise HTTPException(status_code=500, detail=f"vision describe failed: {exc}") from exc
 
     return {"ok": True, "caption": caption}
-
-
-@app.post("/knowledge/page")
-def knowledge_page(payload: KnowledgePageRequest) -> dict:
-    docs = store.find_knowledge_documents_by_title(payload.document, limit=5)
-    if not docs:
-        raise HTTPException(status_code=404, detail="document not found")
-
-    doc = docs[0]
-    chunks = store.get_knowledge_chunks_for_document_page(doc["id"], payload.page)
-    images = store.get_knowledge_images_for_document_page(doc["id"], payload.page)
-
-    if not chunks and not images:
-        raise HTTPException(status_code=404, detail="page not found or empty")
-
-    return {
-        "ok": True,
-        "document": doc,
-        "page": payload.page,
-        "chunks": chunks,
-        "images": images,
-    }
-
-
-@app.post("/knowledge/explain_page")
-def knowledge_explain_page(payload: KnowledgePageRequest) -> dict:
-    docs = store.find_knowledge_documents_by_title(payload.document, limit=5)
-    if not docs:
-        raise HTTPException(status_code=404, detail="document not found")
-
-    doc = docs[0]
-    chunks = store.get_knowledge_chunks_for_document_page(doc["id"], payload.page)
-    images = store.get_knowledge_images_for_document_page(doc["id"], payload.page)
-
-    if not chunks and not images:
-        raise HTTPException(status_code=404, detail="page not found or empty")
-
-    text_blocks = []
-    for chunk in chunks:
-        content = (chunk.get("content") or "").strip()
-        if content:
-            text_blocks.append(content)
-
-    image_blocks = []
-    for image in images:
-        caption = (image.get("caption") or "").strip()
-        ocr_text = (image.get("ocr_text") or "").strip()
-
-        block_parts = []
-        if caption:
-            block_parts.append(f"Bildbeschreibung: {caption}")
-        if ocr_text:
-            block_parts.append(f"OCR: {ocr_text}")
-
-        if block_parts:
-            image_blocks.append("\n".join(block_parts))
-
-    context_parts = []
-    if text_blocks:
-        context_parts.append("Seitentext:\n" + "\n\n".join(text_blocks[:20]))
-    if image_blocks:
-        context_parts.append("Bilder der Seite:\n" + "\n\n".join(image_blocks[:20]))
-
-    context = "\n\n".join(context_parts)[:16000]
-
-    system_prompt = (
-        "Du hast direkten Zugriff auf eine konkrete Dokumentseite. "
-        "Erkläre die Seite sachlich und präzise. "
-        "Berücksichtige sowohl Text als auch Bildbeschreibungen. "
-        "Wenn die Seite eine Montageanleitung zeigt, benenne Bauteile, Handaktionen und wahrscheinliche Montageschritte. "
-        "Wenn Unsicherheiten bestehen, sage das klar."
-    )
-
-    user_prompt = (
-        f"Dokument: {doc['title']}\n"
-        f"Seite: {payload.page}\n\n"
-        f"{context}"
-    )
-
-    try:
-        answer = backend.chat(
-            [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ]
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    return {
-        "ok": True,
-        "document": doc,
-        "page": payload.page,
-        "answer": answer,
-    }
-
-
-@app.get("/knowledge/documents")
-def knowledge_documents(q: str = "", limit: int = 20) -> dict:
-    items = store.find_knowledge_documents_by_title(q, limit=limit)
-    return {"items": items}
 
 
 @app.get("/tools/mediumdigest")
@@ -822,7 +713,12 @@ def tools_web_fetch(payload: WebFetchRequest) -> dict:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     shortened = text[:4000]
-    return {"ok": True, "url": payload.url, "text": shortened, "truncated": len(text) > len(shortened)}
+    return {
+        "ok": True,
+        "url": payload.url,
+        "text": shortened,
+        "truncated": len(text) > len(shortened),
+    }
 
 
 @app.post("/tools/web_ask")
@@ -857,6 +753,7 @@ def tools_web_ask(payload: WebAskRequest) -> dict:
     ]
 
     try:
+        ensure_ollama_runtime()
         answer = backend.chat(messages)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -868,6 +765,8 @@ def tools_web_ask(payload: WebAskRequest) -> dict:
 
 @app.post("/reply", response_model=ReplyResponse)
 def reply(payload: ReplyRequest) -> ReplyResponse:
+    ensure_ollama_runtime()
+
     session_id = f"{payload.channel}:{payload.chat_id}"
 
     store.upsert_session(
@@ -882,15 +781,17 @@ def reply(payload: ReplyRequest) -> ReplyResponse:
     document_query, requested_page = extract_document_page_request(payload.text)
     if settings.debug:
         print("DOC PAGE DETECT:", repr(payload.text), "->", repr(document_query), requested_page)
+
     if document_query and requested_page:
         try:
             explained, error = explain_document_page(document_query, requested_page)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-        if settings.debug:
-                print("DIRECT PAGE HIT:", explained["document"]["title"], "page", explained["page"])
         if explained is not None:
+            if settings.debug:
+                print("DIRECT PAGE HIT:", explained["document"]["title"], "page", explained["page"])
+
             answer = explained["answer"].rstrip()
             answer += f"\n\nQuelle:\n{explained['document']['title']}, Seite {explained['page']}"
             if auto_memory_ids:
@@ -923,7 +824,10 @@ def reply(payload: ReplyRequest) -> ReplyResponse:
             store.add_message(session_id, "assistant", answer)
             return ReplyResponse(reply=answer)
 
-    history = store.get_recent_messages(session_id=session_id, max_items=settings.max_history_turns)
+    history = store.get_recent_messages(
+        session_id=session_id,
+        max_items=settings.max_history_turns,
+    )
     raw_rag_hits = retriever.search(payload.text, top_k=settings.rag_top_k)
     rag_hits = select_rag_hits(raw_rag_hits)
 
@@ -953,3 +857,18 @@ def reset_reply(payload: ResetRequest) -> dict:
     session_id = f"telegram:{payload.chat_id}"
     store.reset_session_messages(session_id)
     return {"ok": True, "session_id": session_id}
+
+
+@app.get("/health")
+def health() -> dict:
+    return {
+        "ok": True,
+        "model": settings.ollama_model,
+        "profile": settings.profile_name,
+        "max_history_turns": settings.max_history_turns,
+        "ollama_url": settings.ollama_url,
+        "ollama_autostart": settings.ollama_autostart,
+        "ollama_host": settings.ollama_host,
+        "ollama_port": settings.ollama_port,
+        "ollama_port_open": is_port_open(settings.ollama_host, settings.ollama_port),
+    }

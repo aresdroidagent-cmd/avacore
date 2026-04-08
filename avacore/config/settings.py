@@ -4,7 +4,6 @@ import os
 
 from avacore.config.profiles import PROFILES
 
-
 load_dotenv()
 
 
@@ -18,7 +17,9 @@ class Settings:
         self.profile = PROFILES[self.profile_name]
 
         self.log_level = os.environ.get("AVACORE_LOG_LEVEL", "info")
-        self.debug = os.environ.get("AVACORE_DEBUG", "0").strip() in {"1", "true", "True", "yes", "on"}
+        self.debug = os.environ.get("AVACORE_DEBUG", "0").strip() in {
+            "1", "true", "True", "yes", "on"
+        }
 
         self.db_path = Path(os.environ.get("AVACORE_DB_PATH", "./data/sqlite/avacore.db"))
         self.history_dir = Path(os.environ.get("AVACORE_HISTORY_DIR", "./data/history"))
@@ -29,11 +30,26 @@ class Settings:
             )
         )
 
-        self.ollama_url = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434/api/chat")
-        self.ollama_model = os.environ.get("OLLAMA_MODEL", self.profile["default_model"])
+        self.ollama_host = os.environ.get("OLLAMA_HOST", "127.0.0.1").strip()
+        self.ollama_port = int(os.environ.get("OLLAMA_PORT", "11434"))
+        self.ollama_url = os.environ.get(
+            "OLLAMA_URL",
+            f"http://{self.ollama_host}:{self.ollama_port}/api/chat",
+        ).strip()
+        self.ollama_model = os.environ.get("OLLAMA_MODEL", self.profile["default_model"]).strip()
         self.ollama_timeout_ms = int(
             os.environ.get("OLLAMA_TIMEOUT_MS", str(self.profile["request_timeout_ms"]))
         )
+        self.ollama_autostart = os.environ.get("OLLAMA_AUTOSTART", "1").strip() in {
+            "1", "true", "True", "yes", "on"
+        }
+        self.ollama_startup_timeout = float(
+            os.environ.get("OLLAMA_STARTUP_TIMEOUT", "30")
+        )
+        self.ollama_runtime_log = os.environ.get(
+            "OLLAMA_RUNTIME_LOG",
+            "./data/logs/ollama_runtime.log",
+        ).strip()
 
         self.http_host = os.environ.get("AVACORE_HTTP_HOST", "127.0.0.1")
         self.http_port = int(os.environ.get("AVACORE_HTTP_PORT", "8787"))
@@ -67,11 +83,9 @@ class Settings:
             "AVACORE_EMBEDDING_MODEL",
             "sentence-transformers/all-MiniLM-L6-v2",
         )
-
         self.rag_top_k = int(os.environ.get("AVACORE_RAG_TOP_K", "6"))
         self.rag_chunk_size = int(os.environ.get("AVACORE_RAG_CHUNK_SIZE", "800"))
         self.rag_chunk_overlap = int(os.environ.get("AVACORE_RAG_CHUNK_OVERLAP", "120"))
-
         self.rag_score_threshold = float(os.environ.get("AVACORE_RAG_SCORE_THRESHOLD", "0.35"))
         self.rag_max_context_hits = int(os.environ.get("AVACORE_RAG_MAX_CONTEXT_HITS", "4"))
         self.rag_max_sources = int(os.environ.get("AVACORE_RAG_MAX_SOURCES", "4"))
@@ -81,7 +95,9 @@ class Settings:
         self.medium_feeds = split_csv(os.environ.get("AVACORE_MEDIUM_FEEDS", ""))
         self.news_feeds = split_csv(os.environ.get("AVACORE_NEWS_FEEDS", ""))
 
-        self.ocr_enabled = os.environ.get("AVACORE_OCR_ENABLED", "1").strip() not in {"0", "false", "False"}
+        self.ocr_enabled = os.environ.get("AVACORE_OCR_ENABLED", "1").strip() not in {
+            "0", "false", "False"
+        }
         self.ocr_min_text_length = int(os.environ.get("AVACORE_OCR_MIN_TEXT_LENGTH", "10"))
 
         self.mail_imap_host = os.environ.get("AVACORE_MAIL_IMAP_HOST", "").strip()
@@ -93,18 +109,25 @@ class Settings:
         self.mail_from = os.environ.get("AVACORE_MAIL_FROM", "").strip()
         self.mail_allowed_to = split_csv(os.environ.get("AVACORE_MAIL_ALLOWED_TO", ""))
 
-        self.vision_enabled = os.environ.get("AVACORE_VISION_ENABLED", "1").strip() not in {"0", "false", "False"}
+        self.vision_enabled = os.environ.get("AVACORE_VISION_ENABLED", "1").strip() not in {
+            "0", "false", "False"
+        }
         self.vision_model = os.environ.get(
             "AVACORE_VISION_MODEL",
             "HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
         ).strip()
         self.vision_prompt = os.environ.get(
             "AVACORE_VISION_PROMPT",
-            "Beschreibe dieses Bild knapp, technisch und sachlich. Nenne erkennbare Objekte, Anzeigen, Diagramme, UI-Elemente, Maschinenzustände oder auffällige Strukturen.",
+            "Beschreibe dieses Bild knapp, technisch und sachlich.\n"
+            "Nenne erkennbare Objekte, Anzeigen, Diagramme, UI-Elemente, Maschinenzustände oder auffällige Strukturen.",
         ).strip()
         self.vision_max_new_tokens = int(os.environ.get("AVACORE_VISION_MAX_NEW_TOKENS", "64"))
-        self.vision_on_pdf_images = os.environ.get("AVACORE_VISION_ON_PDF_IMAGES", "0").strip() not in {"0", "false", "False"}
-        self.vision_on_loose_images = os.environ.get("AVACORE_VISION_ON_LOOSE_IMAGES", "1").strip() not in {"0", "false", "False"}
+        self.vision_on_pdf_images = os.environ.get("AVACORE_VISION_ON_PDF_IMAGES", "0").strip() not in {
+            "0", "false", "False"
+        }
+        self.vision_on_loose_images = os.environ.get("AVACORE_VISION_ON_LOOSE_IMAGES", "1").strip() not in {
+            "0", "false", "False"
+        }
         self.vision_min_image_pixels = int(os.environ.get("AVACORE_VISION_MIN_IMAGE_PIXELS", "90000"))
 
 
