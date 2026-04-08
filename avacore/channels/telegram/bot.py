@@ -24,6 +24,13 @@ def is_allowed_chat(chat_id: str) -> bool:
     return bool(allowed) and chat_id == allowed
 
 
+def default_mail_recipient() -> str | None:
+    if not settings.mail_allowed_to:
+        return None
+    recipient = (settings.mail_allowed_to[0] or "").strip()
+    return recipient or None
+
+
 def command_help_text() -> str:
     return (
         "Ava Befehle:\n\n"
@@ -53,7 +60,7 @@ def command_help_text() -> str:
         "Mail:\n"
         "/mail - letzte Mails anzeigen\n"
         "/maildigest - Mails kurz zusammenfassen\n"
-        "/sendmail <subject> | <text> - Mail an dich senden\n"
+        "/sendmail <subject> | <text> - Mail an Standardempfänger senden\n"
         "/mailscript <dateiname.py> | <scriptinhalt> - Python-Script mailen\n"
         "/mailnote <titel> | <inhalt> - wichtigen Inhalt mailen"
     )
@@ -536,6 +543,13 @@ async def sendmail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
         return
 
+    recipient = default_mail_recipient()
+    if not recipient:
+        await update.effective_message.reply_text(
+            "Kein Standardempfänger konfiguriert. Setze AVACORE_MAIL_ALLOWED_TO in .env."
+        )
+        return
+
     raw = " ".join(context.args).strip()
     if not raw or "|" not in raw:
         await update.effective_message.reply_text("Format: /sendmail <subject> | <text>")
@@ -546,7 +560,7 @@ async def sendmail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     response = requests.post(
         f"{api_base()}/mail/send",
         json={
-            "to": "seeberger.robotics@gmail.com",
+            "to": recipient,
             "subject": subject,
             "body": body,
         },
@@ -561,7 +575,7 @@ async def sendmail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text(f"Mailversand fehlgeschlagen: {detail}")
         return
 
-    await update.effective_message.reply_text("Mail gesendet.")
+    await update.effective_message.reply_text(f"Mail gesendet an {recipient}.")
 
 
 async def mailscript_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -571,6 +585,13 @@ async def mailscript_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_id = str(update.effective_chat.id)
     if update.effective_chat.type != "private" or not is_allowed_chat(chat_id):
         await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
+        return
+
+    recipient = default_mail_recipient()
+    if not recipient:
+        await update.effective_message.reply_text(
+            "Kein Standardempfänger konfiguriert. Setze AVACORE_MAIL_ALLOWED_TO in .env."
+        )
         return
 
     raw = " ".join(context.args).strip()
@@ -585,7 +606,7 @@ async def mailscript_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     response = requests.post(
         f"{api_base()}/mail/send_python_script",
         json={
-            "to": "seeberger.robotics@gmail.com",
+            "to": recipient,
             "script_name": script_name,
             "script_body": script_body,
         },
@@ -600,7 +621,7 @@ async def mailscript_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.effective_message.reply_text(f"Script-Mail fehlgeschlagen: {detail}")
         return
 
-    await update.effective_message.reply_text("Python-Script per Mail gesendet.")
+    await update.effective_message.reply_text(f"Python-Script per Mail gesendet an {recipient}.")
 
 
 async def mailnote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -610,6 +631,13 @@ async def mailnote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chat_id = str(update.effective_chat.id)
     if update.effective_chat.type != "private" or not is_allowed_chat(chat_id):
         await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
+        return
+
+    recipient = default_mail_recipient()
+    if not recipient:
+        await update.effective_message.reply_text(
+            "Kein Standardempfänger konfiguriert. Setze AVACORE_MAIL_ALLOWED_TO in .env."
+        )
         return
 
     raw = " ".join(context.args).strip()
@@ -622,7 +650,7 @@ async def mailnote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     response = requests.post(
         f"{api_base()}/mail/send_important_note",
         json={
-            "to": "seeberger.robotics@gmail.com",
+            "to": recipient,
             "title": title,
             "note": note,
         },
@@ -637,7 +665,7 @@ async def mailnote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text(f"Wichtige-Mail fehlgeschlagen: {detail}")
         return
 
-    await update.effective_message.reply_text("Wichtiger Inhalt per Mail gesendet.")
+    await update.effective_message.reply_text(f"Wichtiger Inhalt per Mail gesendet an {recipient}.")
 
 
 async def docs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -775,7 +803,6 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text(reply_text)
         return
 
-    # Telegram-Limit grob umgehen
     chunk_size = 3800
     for i in range(0, len(reply_text), chunk_size):
         await update.effective_message.reply_text(reply_text[i:i + chunk_size])
@@ -824,6 +851,7 @@ def build_app() -> Application:
 
 def build_application() -> Application:
     return build_app()
+
 
 def main() -> None:
     app = build_app()
