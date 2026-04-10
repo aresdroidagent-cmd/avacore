@@ -422,5 +422,4 @@ This README includes:
 - Ollama autostart from AvaCore
 - Telegram bot usage
 - SmolVLM2-based vision path
-- model-store migration from `/usr/share/ollama/.ollama/models` to `~/.ollama/models`
 - notes about PDF and image vectorization
