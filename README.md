@@ -21,7 +21,7 @@ This setup has been tested in the following environment:
 - Ubuntu 20.04.x
 - Python 3.10
 - NVIDIA Quadro RTX 4000 with 8 GB VRAM
-- CUDA-capable PyTorch
+- CUDA 13.0 / PyTorch
 - Ollama 0.20.3
 
 Models already used in this setup:
@@ -33,6 +33,15 @@ Models already used in this setup:
 - `llama3.2:3b`
 - `lfm2.5-thinking:latest`
 
+# Create Models with bigger Standard-Ollama-Context
+```bash
+cat > ~/Modelfile.llama3.2-3b-32k <<'EOF'
+FROM llama3.2:3b
+PARAMETER num_ctx 32768
+EOF
+
+ollama create llama3.2:3b-32k -f ~/Modelfile.llama3.2-3b-32k
+```
 ## Project overview
 
 Important entry points and modules:
@@ -104,48 +113,10 @@ Then verify:
 ```bash
 ollama list
 ```
-
-## Important note about Ollama model paths
-
-After an Ollama update or reinstall, models may end up in a different directory than expected.
-
-In a real setup, two stores appeared:
-
-- `~/.ollama/models`
-- `/usr/share/ollama/.ollama/models`
-
-If `ollama list` suddenly becomes empty although models existed before, check both locations:
-
+## open a Terminal and
 ```bash
-find ~/.ollama/models/manifests -type f | sed -n '1,50p'
-sudo find /usr/share/ollama/.ollama/models/manifests -type f | sed -n '1,50p'
+ollama serve
 ```
-
-If the old models are still in the system path, the cleanest fix is to migrate them into the user store:
-
-```bash
-pkill -f "ollama serve"
-mkdir -p ~/.ollama/models
-rsync -a --info=progress2 /usr/share/ollama/.ollama/models/ ~/.ollama/models/
-chown -R "$USER":"$USER" ~/.ollama
-```
-
-Then verify again:
-
-```bash
-ollama list
-```
-
-## Ollama as a service or via AvaCore autostart
-
-AvaCore can start Ollama itself. In that case, a permanent systemd service is not required.
-
-```bash
-sudo systemctl stop ollama
-sudo systemctl disable ollama
-```
-
-If `mask` fails, that is not critical in this setup. `stop` and `disable` are enough.
 
 ## Create `.env` from `.env.example`
 
@@ -299,6 +270,21 @@ At minimum:
 ```env
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_ALLOWED_CHAT_ID=...
+```
+## Start Project
+# 1) Put PDFs into data/knowledge/inbox/pdf
+# 2) Put images into data/knowledge/inbox/images
+# 3) Build / refresh the knowledge index
+```bash
+python scripts/index_knowledge.py
+```
+# 4) Start the API
+```bash
+python scripts/run_api.py
+```
+# 5) Start Telegram in a second terminal
+```bash
+python scripts/run_telegram.py
 ```
 
 ## Start the Telegram bot
