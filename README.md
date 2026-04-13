@@ -464,81 +464,105 @@ If the chat ID does not match, AvaCore rejects the conversation.
 
 AvaCore exposes a set of Telegram commands for system status, memory, documents, weather, web tools and mail actions.
 
-Basic commands
+### Basic commands
 /start
 Start Ava and show the command overview.
+
 /help
 Show the available commands.
+
 /health
 Show AvaCore runtime status.
+
 /model
 Show the currently active Ollama model and profile.
+
 /personality
 Show the active personality configuration.
+
 /personalitybackup
 Save the current personality into SQLite.
+
 /personalityrestore <profile_id>
 Restore a stored personality profile.
-Memory and policy commands
+
+### Memory and policy commands
+
 /memories
 List stored memories.
+
 /remember <text>
 Store a manual memory entry.
+
 /policies
 Show active policies.
+
 /reset
 Reset the current Telegram chat history in AvaCore.
-Document and knowledge commands
+
+### Document and knowledge commands
+
 /docs [keyword]
 List known documents from the knowledge base.
+
 /page <document name> | <page>
 Explain a specific page from a document.
-
 These commands rely on the indexed knowledge base.
+
 If new PDFs or images were added, run:
-
 python scripts/index_knowledge.py
-
 before expecting retrieval to use the new content.
 
-Weather and feed commands
+### Weather and feed commands
+
 /weather [location]
 Show a short weather summary.
+
 /medium
 Show current Medium feed entries.
+
 /news
 Show current news feed entries.
+
 /mediumdigest
 Summarize Medium feed entries.
+
 /newsdigest
 Summarize news feed entries.
-Web commands
+
+### Web commands
+
 /webfetch <url>
 Fetch raw readable page text from a URL.
+
 /webask <url> <question>
 Ask a question about a specific webpage.
-Mail commands
+
+### Mail commands
+
 /mail
 Show recent inbox entries.
+
 /maildigest
 Summarize recent emails.
+
 /sendmail <subject> | <text>
 Send a mail to the configured default recipient.
-/mailscript <filename.py> | <script content>
+
+/mailscript <filename.py> | <content>
 Send Python script content by mail.
+
 /mailnote <title> | <content>
 Send an important note by mail.
 
 ### The default recipient is taken from:
 
 AVACORE_MAIL_ALLOWED_TO=someone@example.com
-
 The Telegram bot uses the first configured address as its default mail target.
 
-Free-text chat
+### Free-text chat
 
 In addition to commands, Ava also accepts normal Telegram text messages.
-
 These are forwarded to the /reply API endpoint and can use:
 
 chat history
