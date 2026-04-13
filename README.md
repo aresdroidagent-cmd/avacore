@@ -413,3 +413,136 @@ This README includes:
 - Telegram bot usage
 - SmolVLM2-based vision path
 - notes about PDF and image vectorization
+
+
+# Telegram integration
+
+AvaCore can be connected to Telegram through a private bot interface.
+
+Requirements
+
+## You need:
+
+a Telegram bot token from BotFather
+the Telegram chat ID that is allowed to talk to AvaCore
+the HTTP API running locally, because the Telegram bot forwards requests to the API worker
+Environment variables
+
+## Set these values in .env:
+
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+TELEGRAM_ALLOWED_CHAT_ID=your_private_chat_id
+How it works
+scripts/run_telegram.py starts the Telegram bot
+the bot only accepts messages from the configured private chat
+incoming Telegram messages are forwarded to the AvaCore HTTP API
+the API handles chat memory, retrieval, document lookup, vision endpoints, policies and model access
+Start Telegram
+
+## Run the API first:
+
+```bash
+cd ~/avacore
+source .venv/bin/activate
+python scripts/run_api.py
+```
+
+## Then start Telegram in a second terminal:
+
+```bash
+cd ~/avacore
+source .venv/bin/activate
+python scripts/run_telegram.py
+```
+
+## Security note
+
+The Telegram bot is intentionally restricted to one configured private chat via TELEGRAM_ALLOWED_CHAT_ID.
+If the chat ID does not match, AvaCore rejects the conversation.
+
+## Telegram commands and Ava skills
+
+AvaCore exposes a set of Telegram commands for system status, memory, documents, weather, web tools and mail actions.
+
+Basic commands
+/start
+Start Ava and show the command overview.
+/help
+Show the available commands.
+/health
+Show AvaCore runtime status.
+/model
+Show the currently active Ollama model and profile.
+/personality
+Show the active personality configuration.
+/personalitybackup
+Save the current personality into SQLite.
+/personalityrestore <profile_id>
+Restore a stored personality profile.
+Memory and policy commands
+/memories
+List stored memories.
+/remember <text>
+Store a manual memory entry.
+/policies
+Show active policies.
+/reset
+Reset the current Telegram chat history in AvaCore.
+Document and knowledge commands
+/docs [keyword]
+List known documents from the knowledge base.
+/page <document name> | <page>
+Explain a specific page from a document.
+
+These commands rely on the indexed knowledge base.
+If new PDFs or images were added, run:
+
+python scripts/index_knowledge.py
+
+before expecting retrieval to use the new content.
+
+Weather and feed commands
+/weather [location]
+Show a short weather summary.
+/medium
+Show current Medium feed entries.
+/news
+Show current news feed entries.
+/mediumdigest
+Summarize Medium feed entries.
+/newsdigest
+Summarize news feed entries.
+Web commands
+/webfetch <url>
+Fetch raw readable page text from a URL.
+/webask <url> <question>
+Ask a question about a specific webpage.
+Mail commands
+/mail
+Show recent inbox entries.
+/maildigest
+Summarize recent emails.
+/sendmail <subject> | <text>
+Send a mail to the configured default recipient.
+/mailscript <filename.py> | <script content>
+Send Python script content by mail.
+/mailnote <title> | <content>
+Send an important note by mail.
+
+### The default recipient is taken from:
+
+AVACORE_MAIL_ALLOWED_TO=someone@example.com
+
+The Telegram bot uses the first configured address as its default mail target.
+
+Free-text chat
+
+In addition to commands, Ava also accepts normal Telegram text messages.
+
+These are forwarded to the /reply API endpoint and can use:
+
+chat history
+stored memories
+retrieved document context
+the active Ollama model
+policies and personality settings
