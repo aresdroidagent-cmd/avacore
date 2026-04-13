@@ -271,59 +271,49 @@ At minimum:
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_ALLOWED_CHAT_ID=...
 ```
-## Start Project
-# 1) Put PDFs into data/knowledge/inbox/pdf
-# 2) Put images into data/knowledge/inbox/images
-# 3) Build / refresh the knowledge index
+# Start Project
+## 1) Put PDFs into data/knowledge/inbox/pdf
+## 2) Put images into data/knowledge/inbox/images
+## 3) Build / refresh the knowledge index
 ```bash
+cd ~/avacore
+source .venv/bin/activate
 python scripts/index_knowledge.py
 ```
-# 4) Start the API
+## 4) Start the API
 ```bash
+cd ~/avacore
+source .venv/bin/activate
 python scripts/run_api.py
 ```
-# 5) Start Telegram in a second terminal
-```bash
-python scripts/run_telegram.py
-```
-
-## Start the Telegram bot
-
+## 5) Start Telegram in a second terminal
 ```bash
 cd ~/avacore
 source .venv/bin/activate
 python scripts/run_telegram.py
 ```
 
-## Start the HTTP API
+# Quick tests
 
-```bash
-cd ~/avacore
-source .venv/bin/activate
-python scripts/run_api.py
-```
-
-## Quick tests
-
-### Health
+## Health
 
 ```bash
 curl http://127.0.0.1:8787/health
 ```
 
-### Model status
+## Model status
 
 ```bash
 curl http://127.0.0.1:8787/model
 ```
 
-### Ollama tags
+## Ollama tags
 
 ```bash
 curl http://127.0.0.1:11434/api/tags
 ```
 
-### Detect vision mode
+## Detect vision mode
 
 ```bash
 curl -X POST http://127.0.0.1:8787/vision/detect_mode \
@@ -334,7 +324,7 @@ curl -X POST http://127.0.0.1:8787/vision/detect_mode \
   }'
 ```
 
-### Describe image
+## Describe image
 
 ```bash
 curl -X POST http://127.0.0.1:8787/vision/describe_image \
@@ -345,7 +335,7 @@ curl -X POST http://127.0.0.1:8787/vision/describe_image \
   }'
 ```
 
-Optional with an explicit mode:
+## Optional with an explicit mode:
 
 ```bash
 curl -X POST http://127.0.0.1:8787/vision/describe_image \
