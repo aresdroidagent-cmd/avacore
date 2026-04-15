@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>AvaCore Chat</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <h1>AvaCore</h1>
+      <div class="avatar-wrap">
+        <img src="/ui/avatar" alt="Ava" class="avatar" />
+      </div>
+      <nav>
+        <a href="/ui/chat" class="active">Chat</a>
+        <a href="/ui/status">Status</a>
+        <a href="/ui/admin">Admin</a>
+      </nav>
+
+      <section class="panel">
+        <h2>Documents</h2>
+        <div class="row">
+          <input id="docSearch" placeholder="Search documents" />
+          <button id="docSearchBtn">Search</button>
+        </div>
+        <div id="docList" class="doc-list"></div>
+      </section>
+    </aside>
+
+    <main class="main">
+      <section class="panel">
+        <h2>Chat</h2>
+        <div class="row">
+          <input id="channel" value="web" />
+          <input id="userId" value="web-user" />
+          <input id="chatId" value="web-chat" />
+        </div>
+        <div id="chatLog" class="chat-log"></div>
+        <div class="row">
+          <textarea id="prompt" rows="4" placeholder="Ask Ava..."></textarea>
+        </div>
+        <div class="row">
+          <button id="sendBtn">Send</button>
+          <button id="resetBtn" class="secondary">Reset chat</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Document page view</h2>
+        <div class="row">
+          <input id="pageDocument" placeholder="Document title" />
+          <input id="pageNumber" type="number" min="1" value="1" />
+          <button id="pageExplainBtn">Explain page</button>
+        </div>
+        <pre id="pageOutput" class="pre"></pre>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

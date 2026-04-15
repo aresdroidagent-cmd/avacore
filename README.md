@@ -570,3 +570,68 @@ stored memories
 retrieved document context
 the active Ollama model
 policies and personality settings
+
+## Web UI
+
+AvaCore includes a minimal browser-based UI on top of the existing FastAPI server.
+
+### Features
+
+- chat page
+- document list and page explain view
+- status page
+- admin page with read-only runtime/config view
+- password-protected admin access for LAN use
+- Ava avatar image shown in the UI
+
+### Environment
+
+Add these values to `.env`:
+
+```env
+AVACORE_HTTP_HOST=0.0.0.0
+AVACORE_HTTP_PORT=8787
+AVACORE_WEB_ADMIN_PASSWORD=change_me_in_lan
+```
+
+Then open in a browser:
+
+http://127.0.0.1:8787/ui/chat
+http://127.0.0.1:8787/ui/status
+http://127.0.0.1:8787/ui/admin
+
+For LAN access, replace 127.0.0.1 with the machine IP, for example:
+
+http://192.168.x.x:8787/ui/chat
+
+### Admin access
+
+The admin page is read-only and protected by the password defined in:
+
+```env
+AVACORE_WEB_ADMIN_PASSWORD=...
+
+```
+### Current UI pages
+
+/ui/chat
+Chat interface with document list and page explain panel.
+
+/ui/status
+Runtime status view.
+
+/ui/admin
+Read-only runtime/configuration view protected by password.
+
+/ui/avatar
+
+Ava image served by the backend.
+Security note
+
+The current admin protection is intentionally simple and should only be used inside a trusted local network.
+
+### Do not expose this setup directly to the internet without:
+
+a reverse proxy
+HTTPS
+stronger authentication

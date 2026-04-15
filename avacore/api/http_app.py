@@ -6,7 +6,9 @@ from pathlib import Path
 import re
 from collections import defaultdict
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from avacore.config.settings import settings
@@ -28,11 +30,12 @@ from avacore.tools.rss_fetch import fetch_feeds
 from avacore.mail.service import MailService
 from avacore.vision.describe import describe_image_with_smolvlm, detect_image_mode
 from avacore.system.ollama_runtime import start_ollama_server
-from avacore.system.ollama_runtime import is_port_open
 
 
 _ollama_process = None
 
+WEB_STATIC_DIR = Path(__file__).resolve().parents[2] / "web" / "static"
+AVA_AVATAR_PATH = Path("~/avacore/data/knowledge/inbox/images/synthese-bots-15.jpg")
 
 def ensure_ollama_runtime() -> None:
     global _ollama_process
@@ -49,6 +52,14 @@ def ensure_ollama_runtime() -> None:
         )
 
 
+def verify_admin_password(x_admin_password: str | None = Header(default=None)) -> None:
+    expected = (getattr(settings, "web_admin_password", "") or "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="Admin password is not configured.")
+    if not x_admin_password or x_admin_password != expected:
+        raise HTTPException(status_code=401, detail="Invalid admin password.")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     ensure_ollama_runtime()
@@ -56,6 +67,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="AvaCore", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=str(WEB_STATIC_DIR)), name="static")
 
 store = SQLiteStore(settings.db_path)
 backend = OllamaBackend(
@@ -413,6 +425,62 @@ def explain_document_page(document_query: str, page: int) -> tuple[dict | None, 
     return {"document": doc, "page": page, "answer": answer}, None
 
 
+@app.get("/", include_in_schema=False)
+def ui_root():
+    return RedirectResponse(url="/ui/chat")
+
+
+@app.get("/ui/chat", include_in_schema=False)
+def ui_chat():
+    return FileResponse(WEB_STATIC_DIR / "chat.html")
+
+
+@app.get("/ui/status", include_in_schema=False)
+def ui_status():
+    return FileResponse(WEB_STATIC_DIR / "status.html")
+
+
+@app.get("/ui/admin", include_in_schema=False)
+def ui_admin():
+    return FileResponse(WEB_STATIC_DIR / "admin.html")
+
+
+@app.get("/admin/runtime")
+def admin_runtime(_: None = Depends(verify_admin_password)) -> dict:
+    return {
+        "profile_name": settings.profile_name,
+        "ollama_model": settings.ollama_model,
+        "ollama_url": settings.ollama_url,
+        "ollama_host": settings.ollama_host,
+        "ollama_port": settings.ollama_port,
+        "ollama_autostart": settings.ollama_autostart,
+        "ollama_runtime_log": settings.ollama_runtime_log,
+        "http_host": settings.http_host,
+        "http_port": settings.http_port,
+        "db_path": str(settings.db_path),
+        "history_dir": str(settings.history_dir),
+        "knowledge_inbox_pdf_dir": str(settings.knowledge_inbox_pdf_dir),
+        "knowledge_inbox_images_dir": str(settings.knowledge_inbox_images_dir),
+        "knowledge_processed_dir": str(settings.knowledge_processed_dir),
+        "knowledge_pdf_images_dir": str(settings.knowledge_pdf_images_dir),
+        "knowledge_image_text_dir": str(settings.knowledge_image_text_dir),
+        "knowledge_index_dir": str(settings.knowledge_index_dir),
+        "embedding_model": settings.embedding_model,
+        "rag_top_k": settings.rag_top_k,
+        "rag_chunk_size": settings.rag_chunk_size,
+        "rag_chunk_overlap": settings.rag_chunk_overlap,
+        "rag_score_threshold": settings.rag_score_threshold,
+        "vision_enabled": settings.vision_enabled,
+        "vision_model": settings.vision_model,
+        "vision_on_pdf_images": settings.vision_on_pdf_images,
+        "vision_on_loose_images": settings.vision_on_loose_images,
+        "vision_min_image_pixels": settings.vision_min_image_pixels,
+        "mail_from": settings.mail_from,
+        "mail_allowed_to": settings.mail_allowed_to,
+        "telegram_allowed_chat_id": settings.telegram_allowed_chat_id,
+    }
+
+
 @app.get("/health", response_model=HealthStatus)
 def health() -> HealthStatus:
     ensure_ollama_runtime()
@@ -512,6 +580,11 @@ def knowledge_documents(q: str = "", limit: int = 20) -> dict:
     items = store.find_knowledge_documents_by_title(q, limit=limit)
     return {"items": items}
 
+@app.get("/ui/avatar", include_in_schema=False)
+def ui_avatar():
+    if not AVA_AVATAR_PATH.exists():
+        raise HTTPException(status_code=404, detail="Avatar image not found")
+    return FileResponse(AVA_AVATAR_PATH)
 
 @app.post("/knowledge/page")
 def knowledge_page(payload: KnowledgePageRequest) -> dict:
@@ -857,18 +930,3 @@ def reset_reply(payload: ResetRequest) -> dict:
     session_id = f"telegram:{payload.chat_id}"
     store.reset_session_messages(session_id)
     return {"ok": True, "session_id": session_id}
-
-
-@app.get("/health")
-def health() -> dict:
-    return {
-        "ok": True,
-        "model": settings.ollama_model,
-        "profile": settings.profile_name,
-        "max_history_turns": settings.max_history_turns,
-        "ollama_url": settings.ollama_url,
-        "ollama_autostart": settings.ollama_autostart,
-        "ollama_host": settings.ollama_host,
-        "ollama_port": settings.ollama_port,
-        "ollama_port_open": is_port_open(settings.ollama_host, settings.ollama_port),
-    }

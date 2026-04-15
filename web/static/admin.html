@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>AvaCore Admin</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="single-page">
+    <h1>AvaCore Admin</h1>
+    <div class="avatar-wrap">
+      <img src="/ui/avatar" alt="Ava" class="avatar" />
+    </div>
+    <nav class="topnav">
+      <a href="/ui/chat">Chat</a>
+      <a href="/ui/status">Status</a>
+      <a href="/ui/admin" class="active">Admin</a>
+    </nav>
+
+    <section class="panel">
+      <h2>Admin login</h2>
+      <div class="row">
+        <input id="adminPassword" type="password" placeholder="Admin password" />
+        <button id="adminLoginBtn">Unlock</button>
+        <button id="adminClearBtn" class="secondary">Clear</button>
+      </div>
+      <p class="muted">Read-only runtime/config view for LAN use.</p>
+    </section>
+
+    <section class="panel">
+      <h2>Runtime configuration</h2>
+      <pre id="adminOutput" class="pre"></pre>
+    </section>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

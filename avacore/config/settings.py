@@ -53,6 +53,7 @@ class Settings:
 
         self.http_host = os.environ.get("AVACORE_HTTP_HOST", "127.0.0.1")
         self.http_port = int(os.environ.get("AVACORE_HTTP_PORT", "8787"))
+        self.web_admin_password = os.environ.get("AVACORE_WEB_ADMIN_PASSWORD", "").strip()
 
         self.telegram_bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
         self.telegram_allowed_chat_id = os.environ.get("TELEGRAM_ALLOWED_CHAT_ID", "").strip()
@@ -129,6 +130,5 @@ class Settings:
             "0", "false", "False"
         }
         self.vision_min_image_pixels = int(os.environ.get("AVACORE_VISION_MIN_IMAGE_PIXELS", "90000"))
-
 
 settings = Settings()
