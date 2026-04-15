@@ -54,6 +54,12 @@ class Settings:
         self.http_host = os.environ.get("AVACORE_HTTP_HOST", "127.0.0.1")
         self.http_port = int(os.environ.get("AVACORE_HTTP_PORT", "8787"))
         self.web_admin_password = os.environ.get("AVACORE_WEB_ADMIN_PASSWORD", "").strip()
+        self.web_avatar_path = Path(
+            os.environ.get(
+                "AVACORE_WEB_AVATAR_PATH",
+                "./data/knowledge/inbox/images/synthese-bots-15.jpg",
+            )
+        ).expanduser()
 
         self.telegram_bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
         self.telegram_allowed_chat_id = os.environ.get("TELEGRAM_ALLOWED_CHAT_ID", "").strip()

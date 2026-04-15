@@ -630,6 +630,16 @@ Security note
 
 The current admin protection is intentionally simple and should only be used inside a trusted local network.
 
+### Avatar image
+
+The web UI can display an Ava avatar image served by the backend.
+
+Set the image path in `.env`:
+
+```env
+AVACORE_WEB_AVATAR_PATH=./data/knowledge/inbox/images/synthese-bots-15.jpg
+```
+
 ### Do not expose this setup directly to the internet without:
 
 a reverse proxy
