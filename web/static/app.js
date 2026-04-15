@@ -20,6 +20,7 @@ function appendChat(role, text) {
   div.className = "chat-entry";
   div.innerHTML = `<strong>${role}</strong>\n${text}`;
   log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
 }
 
 async function loadDocuments() {
@@ -39,7 +40,8 @@ async function loadDocuments() {
       const div = document.createElement("div");
       div.className = "doc-item";
       const title = item.title || "";
-      div.innerHTML = `<strong>${title}</strong>`;
+      const type = item.doc_type || "";
+      div.innerHTML = `<strong>${title}</strong><br><span class="muted">${type}</span>`;
       div.onclick = () => {
         const target = document.getElementById("pageDocument");
         if (target) target.value = title;
@@ -54,20 +56,20 @@ async function loadDocuments() {
 async function sendChat() {
   const text = document.getElementById("prompt")?.value?.trim();
   if (!text) return;
+  const payload = {
+    channel: document.getElementById("channel")?.value || "web",
+    user_id: document.getElementById("userId")?.value || "web-user",
+    chat_id: document.getElementById("chatId")?.value || "web-chat",
+    text,
+    timestamp: Math.floor(Date.now() / 1000)
+  };
   appendChat("user", text);
   document.getElementById("prompt").value = "";
-
   try {
     const data = await fetchJson("/reply", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({
-        channel: document.getElementById("channel")?.value || "web",
-        user_id: document.getElementById("userId")?.value || "web-user",
-        chat_id: document.getElementById("chatId")?.value || "web-chat",
-        text,
-        timestamp: Math.floor(Date.now() / 1000)
-      })
+      body: JSON.stringify(payload)
     });
     appendChat("ava", data.reply || "");
   } catch (err) {
@@ -77,11 +79,15 @@ async function sendChat() {
 
 async function resetChat() {
   const chatId = document.getElementById("chatId")?.value || "web-chat";
+  const channel = document.getElementById("channel")?.value || "web";
   try {
     await fetchJson("/reply", {
       method: "DELETE",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({chat_id: chatId})
+      body: JSON.stringify({
+        channel,
+        chat_id: chatId
+      })
     });
     setText("chatLog", "");
   } catch (err) {
@@ -93,7 +99,6 @@ async function explainPage() {
   const documentName = document.getElementById("pageDocument")?.value?.trim();
   const page = Number(document.getElementById("pageNumber")?.value || "1");
   if (!documentName) return;
-
   try {
     const data = await fetchJson("/knowledge/explain_page", {
       method: "POST",

@@ -125,8 +125,7 @@ class Settings:
         ).strip()
         self.vision_prompt = os.environ.get(
             "AVACORE_VISION_PROMPT",
-            "Beschreibe dieses Bild knapp, technisch und sachlich.\n"
-            "Nenne erkennbare Objekte, Anzeigen, Diagramme, UI-Elemente, Maschinenzustände oder auffällige Strukturen.",
+            "",
         ).strip()
         self.vision_max_new_tokens = int(os.environ.get("AVACORE_VISION_MAX_NEW_TOKENS", "64"))
         self.vision_on_pdf_images = os.environ.get("AVACORE_VISION_ON_PDF_IMAGES", "0").strip() not in {
@@ -136,5 +135,6 @@ class Settings:
             "0", "false", "False"
         }
         self.vision_min_image_pixels = int(os.environ.get("AVACORE_VISION_MIN_IMAGE_PIXELS", "90000"))
+
 
 settings = Settings()

@@ -33,9 +33,9 @@ from avacore.system.ollama_runtime import start_ollama_server
 
 
 _ollama_process = None
-
 WEB_STATIC_DIR = Path(__file__).resolve().parents[2] / "web" / "static"
 AVA_AVATAR_PATH = settings.web_avatar_path
+
 
 def ensure_ollama_runtime() -> None:
     global _ollama_process
@@ -105,6 +105,7 @@ class ReplyResponse(BaseModel):
 
 
 class ResetRequest(BaseModel):
+    channel: str = "web"
     chat_id: str
 
 
@@ -226,12 +227,24 @@ def build_system_prompt(
     profile = load_active_personality_profile()
     base = personality_manager.render_system_prompt(profile)
 
-    parts = [base]
+    identity_block = (
+        "Du bist Ava, der lokale Assistent dieses Systems. "
+        "Dein Name ist Ava. "
+        "Du bist nicht Gemma, nicht Ollama und nicht nur das zugrunde liegende Modell. "
+        "Wenn du nach deinem Namen oder deiner Identität gefragt wirst, antworte als Ava. "
+        f"Das aktuell verwendete Modell im Hintergrund ist {settings.ollama_model}. "
+        "Wenn nach dem zugrunde liegenden Modell gefragt wird, nenne es getrennt von deiner Identität."
+    )
+
+    parts = [identity_block, base]
 
     if memory_scope:
-        memory_lines = store.get_memory_prompt_lines(scope=memory_scope, limit=5)
+        memory_lines = store.get_memory_prompt_lines(scope=memory_scope, limit=8)
         if memory_lines:
-            parts.append("Relevante bekannte Erinnerungen:\n" + "\n".join(memory_lines))
+            parts.append(
+                "Bekannter relevanter Nutzerkontext:\n"
+                + "\n".join(memory_lines)
+            )
 
     if rag_hits:
         rag_lines = []
@@ -241,10 +254,17 @@ def build_system_prompt(
                 label += f" (Seite {hit['page_number']})"
             score = float(hit.get("score", 0.0))
             rag_lines.append(f"- {label} [Score {score:.2f}]: {hit['content']}")
+
         if rag_lines:
             parts.append(
-                "Relevante Dokumentauszüge aus der Wissensbasis:\n" + "\n".join(rag_lines)
+                "Relevante Wissensbasis-Auszüge:\n"
+                + "\n".join(rag_lines)
             )
+
+    parts.append(
+        "Nutze Gesprächsverlauf, Nutzerkontext und Wissensbasis gemeinsam. "
+        "Wenn etwas nicht sicher aus Kontext oder Wissen hervorgeht, sage das klar."
+    )
 
     return "\n\n".join(parts)
 
@@ -260,6 +280,44 @@ def maybe_store_auto_memory(user_text: str) -> list[int]:
             content=candidate.content,
             tags=candidate.tags,
             importance=candidate.importance,
+        )
+        if new_id is not None:
+            stored_ids.append(new_id)
+
+    return stored_ids
+
+
+def maybe_store_assistant_memory(user_text: str, assistant_text: str) -> list[int]:
+    combined = f"User:\n{user_text}\n\nAssistant:\n{assistant_text}".strip()
+
+    memory_markers = [
+        "du nutzt",
+        "dein setup",
+        "dein projekt",
+        "du arbeitest",
+        "deine umgebung",
+        "du willst",
+        "du bevorzugst",
+        "für dein system",
+        "auf deinem rechner",
+        "in deinem repo",
+        "dein avacore",
+    ]
+
+    lowered = combined.lower()
+    if not any(marker in lowered for marker in memory_markers):
+        return []
+
+    candidates = auto_memory_extractor.extract(combined)
+    stored_ids: list[int] = []
+
+    for candidate in candidates:
+        new_id = store.add_memory_if_new(
+            scope="user",
+            title=candidate.title,
+            content=candidate.content,
+            tags=(candidate.tags + ",assistant_derived").strip(","),
+            importance=max(candidate.importance, 4),
         )
         if new_id is not None:
             stored_ids.append(new_id)
@@ -314,15 +372,13 @@ def extract_document_page_request(user_text: str) -> tuple[str | None, int | Non
     text = (user_text or "").strip()
 
     patterns = [
-        r"(?i)erkläre\s+(?:das\s+)?dokument\s+(.+?)\s+seite\s+(\d+)",
-        r"(?i)was\s+siehst\s+du\s+im\s+dokument\s+(.+?)\s+auf\s+seite\s+(\d+)",
-        r"(?i)fasse\s+(?:das\s+)?dokument\s+(.+?)\s+seite\s+(\d+)\s+zusammen",
+        r"(?i)erkläre\s+(?:mir\s+)?(?:die\s+)?seite\s+(\d+)\s+(?:aus|im|in)\s+(?:dem\s+)?dokument\s+(.+)",
+        r"(?i)erzähl(?:e)?\s+mir\s+(?:etwas\s+)?über\s+(?:die\s+)?seite\s+(\d+)\s+(?:aus|im|in)\s+(?:dem\s+)?dokument\s+(.+)",
+        r"(?i)seite\s+(\d+)\s+(?:aus|im|in)\s+(?:dem\s+)?dokument\s+(.+)",
         r"(?i)dokument\s+(.+?)\s+seite\s+(\d+)",
-        r"(?i)in\s+(.+?)\s+auf\s+seite\s+(\d+)",
-        r"(?i)(.+?)\s+auf\s+seite\s+(\d+)",
+        r"(?i)(.+?)\s+seite\s+(\d+)",
         r"(?i)page\s+(\d+)\s+of\s+(.+)",
         r"(?i)(.+?)\s+page\s+(\d+)",
-        r"(?i)(.+?)\s+seite\s+(\d+)",
     ]
 
     for pattern in patterns:
@@ -330,17 +386,19 @@ def extract_document_page_request(user_text: str) -> tuple[str | None, int | Non
         if not m:
             continue
 
-        if pattern == r"(?i)page\s+(\d+)\s+of\s+(.+)":
-            try:
-                document = m.group(2).strip(" .,:;!?\"'`()[]{}")
-                page = int(m.group(1).strip())
-                return document, page
-            except ValueError:
-                return None, None
-
         try:
-            document = m.group(1).strip(" .,:;!?\"'`()[]{}")
-            page = int(m.group(2).strip())
+            if pattern in {
+                r"(?i)erkläre\s+(?:mir\s+)?(?:die\s+)?seite\s+(\d+)\s+(?:aus|im|in)\s+(?:dem\s+)?dokument\s+(.+)",
+                r"(?i)erzähl(?:e)?\s+mir\s+(?:etwas\s+)?über\s+(?:die\s+)?seite\s+(\d+)\s+(?:aus|im|in)\s+(?:dem\s+)?dokument\s+(.+)",
+                r"(?i)seite\s+(\d+)\s+(?:aus|im|in)\s+(?:dem\s+)?dokument\s+(.+)",
+                r"(?i)page\s+(\d+)\s+of\s+(.+)",
+            }:
+                page = int(m.group(1).strip())
+                document = m.group(2).strip(" .,:;!?\"'`()[]{}")
+            else:
+                document = m.group(1).strip(" .,:;!?\"'`()[]{}")
+                page = int(m.group(2).strip())
+
             return document, page
         except ValueError:
             continue
@@ -386,13 +444,35 @@ def build_page_context(doc: dict, page: int) -> tuple[list[dict], list[dict], st
 
 
 def explain_document_page(document_query: str, page: int) -> tuple[dict | None, str | None]:
-    docs = store.find_knowledge_documents_by_title(document_query, limit=5)
+    docs = store.find_knowledge_documents_by_title(document_query, limit=10)
     if not docs:
         if settings.debug:
             print("DIRECT DOC MISS:", document_query)
         return None, "document not found"
 
+    query_norm = document_query.lower().replace("_", " ").replace("-", " ").strip()
+
+    def score_doc(doc: dict) -> int:
+        title_raw = str(doc.get("title", ""))
+        title = title_raw.lower().replace("_", " ").replace("-", " ").strip()
+        score = 0
+
+        if document_query.lower() == title_raw.lower():
+            score += 100
+        if query_norm == title:
+            score += 80
+        if query_norm in title:
+            score += 40
+
+        for token in query_norm.split():
+            if token and token in title:
+                score += 5
+
+        return score
+
+    docs = sorted(docs, key=score_doc, reverse=True)
     doc = docs[0]
+
     chunks, images, context = build_page_context(doc, page)
 
     if not chunks and not images:
@@ -425,6 +505,52 @@ def explain_document_page(document_query: str, page: int) -> tuple[dict | None, 
     return {"document": doc, "page": page, "answer": answer}, None
 
 
+def get_hybrid_context(payload_text: str, session_id: str) -> tuple[list[dict], list[dict]]:
+    history = store.get_recent_messages(
+        session_id=session_id,
+        max_items=settings.max_history_turns,
+    )
+
+    raw_rag_hits = retriever.search(payload_text, top_k=settings.rag_top_k)
+    rag_hits = select_rag_hits(raw_rag_hits)
+
+    messages = [
+        {
+            "role": "system",
+            "content": build_system_prompt(memory_scope="user", rag_hits=rag_hits),
+        }
+    ]
+    messages.extend(history)
+    messages.append({"role": "user", "content": payload_text})
+
+    return messages, rag_hits
+
+
+def finalize_reply(
+    session_id: str,
+    user_text: str,
+    answer: str,
+    rag_hits: list[dict] | None = None,
+    user_memory_ids: list[int] | None = None,
+) -> ReplyResponse:
+    rag_hits = rag_hits or []
+    user_memory_ids = user_memory_ids or []
+
+    assistant_memory_ids = maybe_store_assistant_memory(user_text, answer)
+
+    if rag_hits:
+        answer = answer.rstrip() + format_rag_sources(rag_hits)
+
+    total_new_memories = len(user_memory_ids) + len(assistant_memory_ids)
+    if total_new_memories:
+        answer = answer.rstrip() + f"\n\n[Auto-Memory: {total_new_memories} neuer Eintrag gespeichert]"
+
+    store.add_message(session_id, "user", user_text)
+    store.add_message(session_id, "assistant", answer)
+
+    return ReplyResponse(reply=answer)
+
+
 @app.get("/", include_in_schema=False)
 def ui_root():
     return RedirectResponse(url="/ui/chat")
@@ -443,6 +569,13 @@ def ui_status():
 @app.get("/ui/admin", include_in_schema=False)
 def ui_admin():
     return FileResponse(WEB_STATIC_DIR / "admin.html")
+
+
+@app.get("/ui/avatar", include_in_schema=False)
+def ui_avatar():
+    if not AVA_AVATAR_PATH.exists():
+        raise HTTPException(status_code=404, detail="Avatar image not found")
+    return FileResponse(AVA_AVATAR_PATH)
 
 
 @app.get("/admin/runtime")
@@ -478,6 +611,7 @@ def admin_runtime(_: None = Depends(verify_admin_password)) -> dict:
         "mail_from": settings.mail_from,
         "mail_allowed_to": settings.mail_allowed_to,
         "telegram_allowed_chat_id": settings.telegram_allowed_chat_id,
+        "web_avatar_path": str(settings.web_avatar_path),
     }
 
 
@@ -580,11 +714,6 @@ def knowledge_documents(q: str = "", limit: int = 20) -> dict:
     items = store.find_knowledge_documents_by_title(q, limit=limit)
     return {"items": items}
 
-@app.get("/ui/avatar", include_in_schema=False)
-def ui_avatar():
-    if not AVA_AVATAR_PATH.exists():
-        raise HTTPException(status_code=404, detail="Avatar image not found")
-    return FileResponse(AVA_AVATAR_PATH)
 
 @app.post("/knowledge/page")
 def knowledge_page(payload: KnowledgePageRequest) -> dict:
@@ -849,7 +978,27 @@ def reply(payload: ReplyRequest) -> ReplyResponse:
         chat_id=payload.chat_id,
     )
 
-    auto_memory_ids = maybe_store_auto_memory(payload.text)
+    user_memory_ids = maybe_store_auto_memory(payload.text)
+
+    name_question = payload.text.strip().lower()
+    if name_question in {
+        "wie ist dein name",
+        "wie heisst du",
+        "wer bist du",
+        "what is your name",
+        "who are you",
+    }:
+        answer = (
+            "Ich bin Ava. "
+            f"Das aktuell verwendete Modell im Hintergrund ist {settings.ollama_model}."
+        )
+        return finalize_reply(
+            session_id=session_id,
+            user_text=payload.text,
+            answer=answer,
+            rag_hits=[],
+            user_memory_ids=user_memory_ids,
+        )
 
     document_query, requested_page = extract_document_page_request(payload.text)
     if settings.debug:
@@ -867,12 +1016,37 @@ def reply(payload: ReplyRequest) -> ReplyResponse:
 
             answer = explained["answer"].rstrip()
             answer += f"\n\nQuelle:\n{explained['document']['title']}, Seite {explained['page']}"
-            if auto_memory_ids:
-                answer += f"\n\n[Auto-Memory: {len(auto_memory_ids)} neuer Eintrag gespeichert]"
 
-            store.add_message(session_id, "user", payload.text)
-            store.add_message(session_id, "assistant", answer)
-            return ReplyResponse(reply=answer)
+            return finalize_reply(
+                session_id=session_id,
+                user_text=payload.text,
+                answer=answer,
+                rag_hits=[],
+                user_memory_ids=user_memory_ids,
+            )
+
+        if error == "document not found":
+            answer = f'Ich konnte kein passendes Dokument zu "{document_query}" finden.'
+            return finalize_reply(
+                session_id=session_id,
+                user_text=payload.text,
+                answer=answer,
+                rag_hits=[],
+                user_memory_ids=user_memory_ids,
+            )
+
+        if error == "page not found or empty":
+            answer = (
+                f"Ich habe das Dokument gefunden, aber Seite {requested_page} "
+                f"ist nicht vorhanden oder enthält keine verarbeitbaren Inhalte."
+            )
+            return finalize_reply(
+                session_id=session_id,
+                user_text=payload.text,
+                answer=answer,
+                rag_hits=[],
+                user_memory_ids=user_memory_ids,
+            )
 
     if looks_like_code_request(payload.text):
         rule = policy_engine.resolve(
@@ -881,52 +1055,49 @@ def reply(payload: ReplyRequest) -> ReplyResponse:
             channel=payload.channel,
             user_id=payload.user_id,
         )
+
         if rule and rule.mode == "ask":
             answer = (
                 "Bevor ich Code erstelle: "
                 "möchtest du zuerst nur ein Konzept/eine Lösungsskizze "
                 "oder direkt konkreten Code?"
             )
-            store.add_message(session_id, "user", payload.text)
-            store.add_message(session_id, "assistant", answer)
-            return ReplyResponse(reply=answer)
+            return finalize_reply(
+                session_id=session_id,
+                user_text=payload.text,
+                answer=answer,
+                rag_hits=[],
+                user_memory_ids=user_memory_ids,
+            )
 
         if rule and rule.mode == "deny":
             answer = "Code-Erzeugung ist aktuell durch Policy gesperrt."
-            store.add_message(session_id, "user", payload.text)
-            store.add_message(session_id, "assistant", answer)
-            return ReplyResponse(reply=answer)
+            return finalize_reply(
+                session_id=session_id,
+                user_text=payload.text,
+                answer=answer,
+                rag_hits=[],
+                user_memory_ids=user_memory_ids,
+            )
 
-    history = store.get_recent_messages(
-        session_id=session_id,
-        max_items=settings.max_history_turns,
-    )
-    raw_rag_hits = retriever.search(payload.text, top_k=settings.rag_top_k)
-    rag_hits = select_rag_hits(raw_rag_hits)
-
-    messages = [{"role": "system", "content": build_system_prompt(memory_scope="user", rag_hits=rag_hits)}]
-    messages.extend(history)
-    messages.append({"role": "user", "content": payload.text})
+    messages, rag_hits = get_hybrid_context(payload.text, session_id=session_id)
 
     try:
         answer = backend.chat(messages)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    if rag_hits:
-        answer = answer.rstrip() + format_rag_sources(rag_hits)
-
-    if auto_memory_ids:
-        answer = answer.rstrip() + f"\n\n[Auto-Memory: {len(auto_memory_ids)} neuer Eintrag gespeichert]"
-
-    store.add_message(session_id, "user", payload.text)
-    store.add_message(session_id, "assistant", answer)
-
-    return ReplyResponse(reply=answer)
+    return finalize_reply(
+        session_id=session_id,
+        user_text=payload.text,
+        answer=answer,
+        rag_hits=rag_hits,
+        user_memory_ids=user_memory_ids,
+    )
 
 
 @app.delete("/reply")
 def reset_reply(payload: ResetRequest) -> dict:
-    session_id = f"telegram:{payload.chat_id}"
+    session_id = f"{payload.channel}:{payload.chat_id}"
     store.reset_session_messages(session_id)
     return {"ok": True, "session_id": session_id}
