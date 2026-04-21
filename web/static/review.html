@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>AvaCore Review</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="single-page">
+    <h1>AvaCore Review</h1>
+
+    <div class="avatar-wrap">
+      <img src="/ui/avatar" alt="Ava" class="avatar" />
+    </div>
+
+    <nav class="topnav">
+      <a href="/ui/chat">Chat</a>
+      <a href="/ui/status">Status</a>
+      <a href="/ui/admin">Admin</a>
+      <a href="/ui/review" class="active">Review</a>
+    </nav>
+
+    <section class="panel">
+      <h2>Review login</h2>
+      <div class="row">
+        <input id="reviewAdminPassword" type="password" placeholder="Admin password" />
+        <button id="reviewLoginBtn">Unlock</button>
+        <button id="reviewClearBtn" class="secondary">Clear</button>
+        <button id="reviewRefreshBtn">Refresh</button>
+      </div>
+      <p class="muted">
+        Candidate memories can be reviewed here. Only verified memories should be trusted as long-term knowledge.
+      </p>
+    </section>
+
+    <section class="panel">
+      <h2>Candidate memories</h2>
+      <div id="candidateList" class="review-list"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Verified memories</h2>
+      <div id="verifiedList" class="review-list"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Rejected memories</h2>
+      <div id="rejectedList" class="review-list"></div>
+    </section>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

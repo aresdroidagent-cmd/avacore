@@ -614,21 +614,27 @@ AVACORE_WEB_ADMIN_PASSWORD=...
 ```
 ### Current UI pages
 
-/ui/chat
+- /ui/chat
 Chat interface with document list and page explain panel.
 
-/ui/status
+- /ui/status
 Runtime status view.
 
-/ui/admin
+- /ui/admin
 Read-only runtime/configuration view protected by password.
 
-/ui/avatar
+- /ui/avatar
 
 Ava image served by the backend.
 Security note
 
 The current admin protection is intentionally simple and should only be used inside a trusted local network.
+
+- `/ui/review`
+
+This page is intended for reviewing memory candidates and managing the `candidate / verified / rejected` workflow.
+
+Like the admin page, it is intended for trusted LAN use and protected by the configured admin password.
 
 ### Avatar image
 
@@ -645,3 +651,83 @@ AVACORE_WEB_AVATAR_PATH=./data/knowledge/inbox/images/synthese-bots-15.jpg
 a reverse proxy
 HTTPS
 stronger authentication
+
+## Memory review workflow
+
+AvaCore now supports a reviewable memory workflow with explicit status handling.
+
+### Memory states
+
+Memory items can exist in three states:
+
+- `candidate`
+- `verified`
+- `rejected`
+
+Only **verified** memory should be treated as trusted long-term memory in the main hybrid chat prompt.
+
+### Purpose
+
+This allows AvaCore to:
+
+- collect potentially useful findings
+- keep unverified facts separate from trusted memory
+- let the user verify or reject memory candidates
+- prepare the system for future agent-style research and controlled learning
+
+### Memory item model
+
+Each reviewable memory item can store:
+
+- `scope`
+- `title`
+- `content`
+- `memory_type`
+- `status`
+- `source_type`
+- `source_ref`
+- `confidence`
+- `importance`
+- `tags`
+
+Typical examples:
+
+- `environment`
+- `project`
+- `preference`
+- `workflow_rule`
+- `document_fact`
+- `web_fact`
+- `research_lead`
+
+### Review UI
+
+AvaCore includes a dedicated browser page for memory review:
+
+- `/ui/review`
+
+The review page allows you to:
+
+- inspect candidate memories
+- verify candidate memories
+- reject candidate memories
+- delete memory items
+
+### Review API
+
+The following endpoints are available for reviewable memory items:
+
+- `GET /memories/items`
+- `GET /memories/candidates`
+- `GET /memories/verified`
+- `GET /memories/rejected`
+- `GET /memories/items/{id}`
+- `POST /memories/items`
+- `POST /memories/items/{id}/verify`
+- `POST /memories/items/{id}/reject`
+- `DELETE /memories/items/{id}`
+
+These endpoints are protected with the admin password and require the header:
+
+```http
+X-Admin-Password: <your admin password>

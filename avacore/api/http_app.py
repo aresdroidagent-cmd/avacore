@@ -117,6 +117,25 @@ class MemoryCreateRequest(BaseModel):
     importance: int = 0
 
 
+class MemoryItemCreateRequest(BaseModel):
+    scope: str = "user"
+    title: str
+    content: str
+    memory_type: str = "note"
+    status: str = "candidate"
+    source_type: str = "chat"
+    source_ref: str = ""
+    confidence: float = 0.0
+    importance: int = 0
+    tags: str = ""
+    created_from_user_text: str = ""
+    created_from_assistant_text: str = ""
+
+
+class MemoryItemReviewRequest(BaseModel):
+    actor: str = "roger"
+
+
 class PersonalityBackupRequest(BaseModel):
     profile_id: str | None = None
     activate: bool = True
@@ -239,7 +258,7 @@ def build_system_prompt(
     parts = [identity_block, base]
 
     if memory_scope:
-        memory_lines = store.get_memory_prompt_lines(scope=memory_scope, limit=8)
+        memory_lines = store.get_verified_memory_prompt_lines(scope=memory_scope, limit=8)
         if memory_lines:
             parts.append(
                 "Bekannter relevanter Nutzerkontext:\n"
@@ -571,6 +590,11 @@ def ui_admin():
     return FileResponse(WEB_STATIC_DIR / "admin.html")
 
 
+@app.get("/ui/review", include_in_schema=False)
+def ui_review():
+    return FileResponse(WEB_STATIC_DIR / "review.html")
+
+
 @app.get("/ui/avatar", include_in_schema=False)
 def ui_avatar():
     if not AVA_AVATAR_PATH.exists():
@@ -699,6 +723,133 @@ def create_memory(payload: MemoryCreateRequest) -> dict:
         tags=payload.tags,
         importance=payload.importance,
     )
+    return {"ok": True, "id": memory_id}
+
+
+@app.get("/memories/items")
+def memory_items(
+    status: str | None = None,
+    memory_type: str | None = None,
+    scope: str | None = None,
+    limit: int = 50,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    items = store.list_memory_items(
+        status=status,
+        memory_type=memory_type,
+        scope=scope,
+        limit=limit,
+    )
+    return {"items": items}
+
+
+@app.get("/memories/candidates")
+def memory_candidates(
+    limit: int = 50,
+    scope: str | None = None,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    items = store.list_memory_items(
+        status="candidate",
+        scope=scope,
+        limit=limit,
+    )
+    return {"items": items}
+
+
+@app.get("/memories/verified")
+def memory_verified(
+    limit: int = 50,
+    scope: str | None = None,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    items = store.list_memory_items(
+        status="verified",
+        scope=scope,
+        limit=limit,
+    )
+    return {"items": items}
+
+
+@app.get("/memories/rejected")
+def memory_rejected(
+    limit: int = 50,
+    scope: str | None = None,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    items = store.list_memory_items(
+        status="rejected",
+        scope=scope,
+        limit=limit,
+    )
+    return {"items": items}
+
+
+@app.get("/memories/items/{memory_id}")
+def memory_item(
+    memory_id: int,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    item = store.get_memory_item(memory_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="memory item not found")
+    return {"item": item}
+
+
+@app.post("/memories/items")
+def create_memory_item(
+    payload: MemoryItemCreateRequest,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    memory_id = store.create_memory_item(
+        scope=payload.scope,
+        title=payload.title,
+        content=payload.content,
+        memory_type=payload.memory_type,
+        status=payload.status,
+        source_type=payload.source_type,
+        source_ref=payload.source_ref,
+        confidence=payload.confidence,
+        importance=payload.importance,
+        tags=payload.tags,
+        created_from_user_text=payload.created_from_user_text,
+        created_from_assistant_text=payload.created_from_assistant_text,
+    )
+    return {"ok": True, "id": memory_id}
+
+
+@app.post("/memories/items/{memory_id}/verify")
+def verify_memory_item(
+    memory_id: int,
+    payload: MemoryItemReviewRequest,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    ok = store.verify_memory_item(memory_id, verified_by=payload.actor)
+    if not ok:
+        raise HTTPException(status_code=404, detail="memory item not found")
+    return {"ok": True, "id": memory_id, "status": "verified"}
+
+
+@app.post("/memories/items/{memory_id}/reject")
+def reject_memory_item(
+    memory_id: int,
+    payload: MemoryItemReviewRequest,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    ok = store.reject_memory_item(memory_id, rejected_by=payload.actor)
+    if not ok:
+        raise HTTPException(status_code=404, detail="memory item not found")
+    return {"ok": True, "id": memory_id, "status": "rejected"}
+
+
+@app.delete("/memories/items/{memory_id}")
+def delete_memory_item(
+    memory_id: int,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    ok = store.delete_memory_item(memory_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="memory item not found")
     return {"ok": True, "id": memory_id}
 
 

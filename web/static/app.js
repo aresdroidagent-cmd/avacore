@@ -23,6 +23,18 @@ function appendChat(role, text) {
   log.scrollTop = log.scrollHeight;
 }
 
+function getAdminPassword() {
+  return localStorage.getItem("avacore_admin_password") || "";
+}
+
+function setAdminPassword(value) {
+  localStorage.setItem("avacore_admin_password", value || "");
+}
+
+function clearAdminPassword() {
+  localStorage.removeItem("avacore_admin_password");
+}
+
 async function loadDocuments() {
   const q = document.getElementById("docSearch")?.value || "";
   const list = document.getElementById("docList");
@@ -122,13 +134,34 @@ async function refreshStatus() {
 }
 
 async function unlockAdmin() {
-  const password = document.getElementById("adminPassword")?.value || "";
-  localStorage.setItem("avacore_admin_password", password);
-  await loadAdminConfig();
+  const password =
+    document.getElementById("adminPassword")?.value ||
+    document.getElementById("reviewAdminPassword")?.value ||
+    "";
+  setAdminPassword(password);
+
+  if (document.getElementById("adminOutput")) {
+    await loadAdminConfig();
+  }
+  if (document.getElementById("candidateList")) {
+    await loadReviewData();
+  }
+}
+
+function clearAdminAccess() {
+  clearAdminPassword();
+  if (document.getElementById("adminOutput")) {
+    setText("adminOutput", "Password cleared.");
+  }
+  if (document.getElementById("candidateList")) {
+    setText("candidateList", "Password cleared.");
+    setText("verifiedList", "");
+    setText("rejectedList", "");
+  }
 }
 
 async function loadAdminConfig() {
-  const password = localStorage.getItem("avacore_admin_password") || "";
+  const password = getAdminPassword();
   try {
     const data = await fetchJson("/admin/runtime", {
       headers: { "X-Admin-Password": password }
@@ -139,9 +172,172 @@ async function loadAdminConfig() {
   }
 }
 
-function clearAdminPassword() {
-  localStorage.removeItem("avacore_admin_password");
-  setText("adminOutput", "Password cleared.");
+function renderMemoryCard(item, mode = "candidate") {
+  const div = document.createElement("div");
+  div.className = "review-item";
+
+  const title = item.title || "";
+  const content = item.content || "";
+  const memoryType = item.memory_type || "";
+  const status = item.status || "";
+  const sourceType = item.source_type || "";
+  const sourceRef = item.source_ref || "";
+  const confidence = item.confidence ?? 0;
+  const tags = item.tags || "";
+  const id = item.id;
+
+  let buttons = "";
+  if (mode === "candidate") {
+    buttons = `
+      <button data-action="verify" data-id="${id}">Verify</button>
+      <button data-action="reject" data-id="${id}" class="secondary">Reject</button>
+      <button data-action="delete" data-id="${id}" class="danger">Delete</button>
+    `;
+  } else if (mode === "verified") {
+    buttons = `
+      <button data-action="reject" data-id="${id}" class="secondary">Reject</button>
+      <button data-action="delete" data-id="${id}" class="danger">Delete</button>
+    `;
+  } else if (mode === "rejected") {
+    buttons = `
+      <button data-action="verify" data-id="${id}">Verify</button>
+      <button data-action="delete" data-id="${id}" class="danger">Delete</button>
+    `;
+  }
+
+  div.innerHTML = `
+    <div class="review-header">
+      <strong>${title}</strong>
+      <span class="badge">${status}</span>
+    </div>
+    <div class="review-meta">
+      <span>type: ${memoryType}</span>
+      <span>source: ${sourceType}</span>
+      <span>ref: ${sourceRef}</span>
+      <span>confidence: ${Number(confidence).toFixed(2)}</span>
+    </div>
+    <div class="review-content">${content}</div>
+    <div class="review-tags muted">${tags}</div>
+    <div class="review-actions">${buttons}</div>
+  `;
+  return div;
+}
+
+async function verifyMemoryItem(id) {
+  const password = getAdminPassword();
+  await fetchJson(`/memories/items/${id}/verify`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Admin-Password": password
+    },
+    body: JSON.stringify({ actor: "roger" })
+  });
+}
+
+async function rejectMemoryItem(id) {
+  const password = getAdminPassword();
+  await fetchJson(`/memories/items/${id}/reject`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Admin-Password": password
+    },
+    body: JSON.stringify({ actor: "roger" })
+  });
+}
+
+async function deleteMemoryItem(id) {
+  const password = getAdminPassword();
+  await fetchJson(`/memories/items/${id}`, {
+    method: "DELETE",
+    headers: {
+      "X-Admin-Password": password
+    }
+  });
+}
+
+async function loadReviewData() {
+  const password = getAdminPassword();
+  const candidateList = document.getElementById("candidateList");
+  const verifiedList = document.getElementById("verifiedList");
+  const rejectedList = document.getElementById("rejectedList");
+  if (!candidateList || !verifiedList || !rejectedList) return;
+
+  candidateList.textContent = "Loading...";
+  verifiedList.textContent = "Loading...";
+  rejectedList.textContent = "Loading...";
+
+  try {
+    const [candidates, verified, rejected] = await Promise.all([
+      fetchJson("/memories/candidates?limit=50", {
+        headers: { "X-Admin-Password": password }
+      }),
+      fetchJson("/memories/verified?limit=50", {
+        headers: { "X-Admin-Password": password }
+      }),
+      fetchJson("/memories/rejected?limit=50", {
+        headers: { "X-Admin-Password": password }
+      }),
+    ]);
+
+    candidateList.innerHTML = "";
+    verifiedList.innerHTML = "";
+    rejectedList.innerHTML = "";
+
+    const cItems = candidates.items || [];
+    const vItems = verified.items || [];
+    const rItems = rejected.items || [];
+
+    if (!cItems.length) {
+      candidateList.textContent = "No candidate memories.";
+    } else {
+      for (const item of cItems) {
+        candidateList.appendChild(renderMemoryCard(item, "candidate"));
+      }
+    }
+
+    if (!vItems.length) {
+      verifiedList.textContent = "No verified memories.";
+    } else {
+      for (const item of vItems) {
+        verifiedList.appendChild(renderMemoryCard(item, "verified"));
+      }
+    }
+
+    if (!rItems.length) {
+      rejectedList.textContent = "No rejected memories.";
+    } else {
+      for (const item of rItems) {
+        rejectedList.appendChild(renderMemoryCard(item, "rejected"));
+      }
+    }
+
+    document.querySelectorAll("[data-action]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const action = btn.getAttribute("data-action");
+        const id = btn.getAttribute("data-id");
+        if (!id) return;
+
+        try {
+          if (action === "verify") {
+            await verifyMemoryItem(id);
+          } else if (action === "reject") {
+            await rejectMemoryItem(id);
+          } else if (action === "delete") {
+            await deleteMemoryItem(id);
+          }
+          await loadReviewData();
+        } catch (err) {
+          alert(String(err));
+        }
+      });
+    });
+  } catch (err) {
+    candidateList.textContent = String(err);
+    verifiedList.textContent = "";
+    rejectedList.textContent = "";
+  }
 }
 
 window.addEventListener("DOMContentLoaded", () => {
@@ -150,10 +346,16 @@ window.addEventListener("DOMContentLoaded", () => {
   document.getElementById("pageExplainBtn")?.addEventListener("click", explainPage);
   document.getElementById("docSearchBtn")?.addEventListener("click", loadDocuments);
   document.getElementById("refreshStatusBtn")?.addEventListener("click", refreshStatus);
+
   document.getElementById("adminLoginBtn")?.addEventListener("click", unlockAdmin);
-  document.getElementById("adminClearBtn")?.addEventListener("click", clearAdminPassword);
+  document.getElementById("adminClearBtn")?.addEventListener("click", clearAdminAccess);
+
+  document.getElementById("reviewLoginBtn")?.addEventListener("click", unlockAdmin);
+  document.getElementById("reviewClearBtn")?.addEventListener("click", clearAdminAccess);
+  document.getElementById("reviewRefreshBtn")?.addEventListener("click", loadReviewData);
 
   if (document.getElementById("docList")) loadDocuments();
   if (document.getElementById("statusOutput")) refreshStatus();
   if (document.getElementById("adminOutput")) loadAdminConfig();
+  if (document.getElementById("candidateList")) loadReviewData();
 });

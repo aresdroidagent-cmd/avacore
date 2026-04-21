@@ -4,21 +4,33 @@ body {
   background: #0f172a;
   color: #e2e8f0;
 }
-a { color: #93c5fd; text-decoration: none; }
-a.active { font-weight: bold; }
+
+a {
+  color: #93c5fd;
+  text-decoration: none;
+}
+
+a.active {
+  font-weight: bold;
+}
+
 .layout {
   display: grid;
   grid-template-columns: 320px 1fr;
   min-height: 100vh;
 }
+
 .sidebar {
   padding: 16px;
   border-right: 1px solid #334155;
   background: #111827;
 }
-.main, .single-page {
+
+.main,
+.single-page {
   padding: 20px;
 }
+
 .panel {
   background: #111827;
   border: 1px solid #334155;
@@ -26,31 +38,47 @@ a.active { font-weight: bold; }
   padding: 16px;
   margin-bottom: 16px;
 }
+
 .row {
   display: flex;
   gap: 8px;
   margin-bottom: 12px;
   flex-wrap: wrap;
 }
-input, textarea, button {
+
+input,
+textarea,
+button {
   border-radius: 8px;
   border: 1px solid #475569;
   background: #0b1220;
   color: #e2e8f0;
   padding: 10px;
 }
-input, textarea {
+
+input,
+textarea {
   flex: 1;
   min-width: 120px;
 }
+
 button {
   cursor: pointer;
   background: #1d4ed8;
 }
+
 button.secondary {
   background: #334155;
 }
-.chat-log, .doc-list, .pre {
+
+button.danger {
+  background: #7f1d1d;
+}
+
+.chat-log,
+.doc-list,
+.pre,
+.review-list {
   background: #020617;
   border: 1px solid #334155;
   border-radius: 8px;
@@ -59,27 +87,76 @@ button.secondary {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
 .chat-entry {
   margin-bottom: 12px;
   padding-bottom: 12px;
   border-bottom: 1px solid #1e293b;
 }
+
 .doc-item {
   padding: 8px 0;
   border-bottom: 1px solid #1e293b;
+  cursor: pointer;
 }
+
+.review-item {
+  border: 1px solid #334155;
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 12px;
+  background: #0b1220;
+}
+
+.review-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.review-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 0.9rem;
+  color: #94a3b8;
+  margin-bottom: 8px;
+}
+
+.review-content {
+  margin-bottom: 8px;
+}
+
+.review-tags {
+  margin-bottom: 10px;
+}
+
+.review-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.badge {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 0.8rem;
+}
+
 .muted {
   color: #94a3b8;
 }
+
 .topnav {
   display: flex;
   gap: 16px;
   margin-bottom: 16px;
+  flex-wrap: wrap;
 }
-@media (max-width: 900px) {
-  .layout { grid-template-columns: 1fr; }
-  .sidebar { border-right: none; border-bottom: 1px solid #334155; }
-}
+
 .avatar-wrap {
   margin: 12px 0 18px 0;
   text-align: center;
@@ -92,4 +169,15 @@ button.secondary {
   border-radius: 16px;
   border: 1px solid #334155;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+@media (max-width: 900px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    border-right: none;
+    border-bottom: 1px solid #334155;
+  }
 }
