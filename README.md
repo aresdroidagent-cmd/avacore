@@ -530,6 +530,10 @@ Summarize Medium feed entries.
 /newsdigest
 Summarize news feed entries.
 
+/camera
+/snapshot
+The Telegram bot can request a live camera snapshot.
+
 ### Web commands
 
 /webfetch <url>
@@ -731,3 +735,32 @@ These endpoints are protected with the admin password and require the header:
 
 ```http
 X-Admin-Password: <your admin password>
+```
+
+## RTSP camera integration
+
+AvaCore can access an RTSP camera and capture snapshots through the backend API.
+
+This was tested with a D-Link DCS-5222L camera.
+
+### OpenCV dependency
+
+For server usage, install the headless OpenCV package with a NumPy version compatible with AvaCore:
+
+```bash
+cd ~/avacore
+source .venv/bin/activate
+
+pip uninstall -y opencv-python-headless opencv-python numpy
+pip install "numpy==1.26.4" "opencv-python-headless==4.10.0.84"
+```
+Do not install the newest unpinned opencv-python-headless, because recent versions may pull numpy>=2, while AvaCore currently expects numpy>=1.26,<2.
+
+Capture a snapshot:
+```bash
+curl -X POST http://127.0.0.1:8787/camera/snapshot
+```
+
+The API stores the snapshot in:
+
+data/cache/camera/

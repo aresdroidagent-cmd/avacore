@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 import requests
-
+from pathlib import Path
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -62,7 +62,9 @@ def command_help_text() -> str:
         "/maildigest - Mails kurz zusammenfassen\n"
         "/sendmail <subject> | <text> - Mail an Standardempfänger senden\n"
         "/mailscript <dateiname.py> | <scriptinhalt> - Python-Script mailen\n"
-        "/mailnote <titel> | <inhalt> - wichtigen Inhalt mailen"
+        "/mailnote <titel> | <inhalt> - wichtigen Inhalt mailen\n"
+        "/camera - aktuelles Kamerabild holen\n"
+        "/snapshot - Alias für /camera\n"
     )
 
 
@@ -807,6 +809,50 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     for i in range(0, len(reply_text), chunk_size):
         await update.effective_message.reply_text(reply_text[i:i + chunk_size])
 
+async def camera_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
+    chat_id = str(update.effective_chat.id)
+    if update.effective_chat.type != "private" or not is_allowed_chat(chat_id):
+        await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
+        return
+
+    await update.effective_message.reply_text("Ich hole ein aktuelles Kamerabild...")
+
+    try:
+        response = requests.post(
+            f"{api_base()}/camera/snapshot",
+            json={},
+            timeout=30,
+        )
+
+        if not response.ok:
+            try:
+                detail = response.json().get("detail", response.text)
+            except Exception:
+                detail = response.text
+            await update.effective_message.reply_text(f"Kamera-Snapshot fehlgeschlagen: {detail}")
+            return
+
+        data = response.json()
+        image_path = Path(data.get("image_path", ""))
+
+        if not image_path.exists():
+            await update.effective_message.reply_text(
+                f"Snapshot wurde erzeugt, aber Datei nicht gefunden: {image_path}"
+            )
+            return
+
+        with image_path.open("rb") as photo:
+            await update.effective_message.reply_photo(
+                photo=photo,
+                caption="Aktuelles Ava-Kamerabild"
+            )
+
+    except Exception as exc:
+        await update.effective_message.reply_text(f"Kamera-Befehl fehlgeschlagen: {exc}")
+
 
 def build_app() -> Application:
     if not settings.telegram_bot_token:
@@ -837,6 +883,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("newsdigest", newsdigest_cmd))
     app.add_handler(CommandHandler("webfetch", webfetch_cmd))
     app.add_handler(CommandHandler("webask", webask_cmd))
+    app.add_handler(CommandHandler("camera", camera_cmd))
+    app.add_handler(CommandHandler("snapshot", camera_cmd))
 
     app.add_handler(CommandHandler("mail", mail_cmd))
     app.add_handler(CommandHandler("maildigest", maildigest_cmd))

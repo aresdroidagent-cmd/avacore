@@ -30,6 +30,7 @@ from avacore.tools.rss_fetch import fetch_feeds
 from avacore.mail.service import MailService
 from avacore.vision.describe import describe_image_with_smolvlm, detect_image_mode
 from avacore.system.ollama_runtime import start_ollama_server
+from avacore.tools.camera_rtsp import build_rtsp_url, capture_rtsp_snapshot
 
 
 _ollama_process = None
@@ -1245,6 +1246,36 @@ def reply(payload: ReplyRequest) -> ReplyResponse:
         rag_hits=rag_hits,
         user_memory_ids=user_memory_ids,
     )
+
+@app.post("/camera/snapshot")
+def camera_snapshot() -> dict:
+    if not settings.camera_enabled:
+        raise HTTPException(status_code=400, detail="camera is disabled")
+
+    if not settings.camera_ip:
+        raise HTTPException(status_code=400, detail="camera IP is not configured")
+
+    try:
+        url = build_rtsp_url(
+            user=settings.camera_user,
+            password=settings.camera_password,
+            ip=settings.camera_ip,
+            rtsp_path=settings.camera_rtsp_path,
+        )
+
+        image_path = capture_rtsp_snapshot(
+            url=url,
+            output_dir=settings.camera_cache_dir,
+            camera_name="dlink-dcs-5222l",
+        )
+
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"camera snapshot failed: {exc}") from exc
+
+    return {
+        "ok": True,
+        "image_path": str(image_path),
+    }
 
 
 @app.delete("/reply")

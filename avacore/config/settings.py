@@ -136,5 +136,16 @@ class Settings:
         }
         self.vision_min_image_pixels = int(os.environ.get("AVACORE_VISION_MIN_IMAGE_PIXELS", "90000"))
 
+        self.camera_enabled = os.environ.get("AVACORE_CAMERA_ENABLED", "0").strip() in {
+            "1", "true", "True", "yes", "on"
+        }
+        self.camera_user = os.environ.get("AVACORE_CAMERA_USER", "admin").strip()
+        self.camera_password = os.environ.get("AVACORE_CAMERA_PASSWORD", "")
+        self.camera_ip = os.environ.get("AVACORE_CAMERA_IP", "").strip()
+        self.camera_rtsp_path = os.environ.get("AVACORE_CAMERA_RTSP_PATH", "/play1.sdp").strip()
+        self.camera_cache_dir = Path(
+            os.environ.get("AVACORE_CAMERA_CACHE_DIR", "./data/cache/camera")
+        )
+
 
 settings = Settings()
