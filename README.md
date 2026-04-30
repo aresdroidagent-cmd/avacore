@@ -130,48 +130,78 @@ Then edit `.env`.
 ## Example `.env`
 
 ```env
+# -----------------------------------------------------------------------------
+# AvaCore profile / logging
+# -----------------------------------------------------------------------------
 AVACORE_PROFILE=low_vram
 AVACORE_LOG_LEVEL=info
 AVACORE_DEBUG=0
 
+# -----------------------------------------------------------------------------
+# Paths
+# -----------------------------------------------------------------------------
 AVACORE_DB_PATH=./data/sqlite/avacore.db
 AVACORE_HISTORY_DIR=./data/history
 AVACORE_PERSONALITY_PATH=./data/personality/default_personality.json
 
+# -----------------------------------------------------------------------------
+# HTTP / Web UI
+# -----------------------------------------------------------------------------
+AVACORE_HTTP_HOST=0.0.0.0
+AVACORE_HTTP_PORT=8787
+AVACORE_WEB_ADMIN_PASSWORD=YOUR_ADMIN_PASSWORD
+AVACORE_WEB_AVATAR_PATH=./data/knowledge/inbox/images/synthese-bots-15.jpg
+
+# -----------------------------------------------------------------------------
+# Ollama
+# -----------------------------------------------------------------------------
 OLLAMA_AUTOSTART=1
 OLLAMA_HOST=127.0.0.1
 OLLAMA_PORT=11434
 OLLAMA_STARTUP_TIMEOUT=30
 OLLAMA_RUNTIME_LOG=./data/logs/ollama_runtime.log
+
 OLLAMA_MODEL=gemma4:e2b
 OLLAMA_TIMEOUT_MS=180000
 OLLAMA_URL=http://127.0.0.1:11434/api/chat
 
-AVACORE_HTTP_HOST=127.0.0.1
-AVACORE_HTTP_PORT=8787
+# -----------------------------------------------------------------------------
+# Telegram
+# -----------------------------------------------------------------------------
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_ALLOWED_CHAT_ID=
 
+# -----------------------------------------------------------------------------
+# Knowledge ingestion / storage
+# -----------------------------------------------------------------------------
+AVACORE_KNOWLEDGE_INBOX_PDF=./data/knowledge/inbox/pdf
+AVACORE_KNOWLEDGE_INBOX_IMAGES=./data/knowledge/inbox/images
+AVACORE_KNOWLEDGE_PROCESSED_DIR=./data/knowledge/processed
+AVACORE_KNOWLEDGE_PDF_IMAGES_DIR=./data/knowledge/processed/pdf_images
+AVACORE_KNOWLEDGE_IMAGE_TEXT_DIR=./data/knowledge/processed/image_text
+AVACORE_KNOWLEDGE_INDEX_DIR=./data/knowledge/index
+
+# -----------------------------------------------------------------------------
+# Retrieval / embeddings
+# -----------------------------------------------------------------------------
+AVACORE_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
 AVACORE_RAG_TOP_K=6
+AVACORE_RAG_CHUNK_SIZE=800
+AVACORE_RAG_CHUNK_OVERLAP=120
 AVACORE_RAG_SCORE_THRESHOLD=0.35
 AVACORE_RAG_MAX_CONTEXT_HITS=4
 AVACORE_RAG_MAX_SOURCES=4
 AVACORE_RAG_MAX_HITS_PER_DOC=2
 
-TELEGRAM_BOT_TOKEN=YOUR_TOKEN_XXXXX
-TELEGRAM_ALLOWED_CHAT_ID=YOUR_CHAT_ID
+# -----------------------------------------------------------------------------
+# OCR
+# -----------------------------------------------------------------------------
+AVACORE_OCR_ENABLED=1
+AVACORE_OCR_MIN_TEXT_LENGTH=10
 
-AVACORE_DEFAULT_LOCATION=Schaffhausen
-AVACORE_MEDIUM_FEEDS=https://medium.com/feed/tag/artificial-intelligence,https://medium.com/feed/tag/robotics
-AVACORE_NEWS_FEEDS=https://feeds.reuters.com/reuters/technologyNews,https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml
-
-AVACORE_MAIL_IMAP_HOST=imap.gmail.com
-AVACORE_MAIL_IMAP_PORT=993
-AVACORE_MAIL_SMTP_HOST=smtp.gmail.com
-AVACORE_MAIL_SMTP_PORT=587
-AVACORE_MAIL_USERNAME=ROBOT_MAIL@gmail.com
-AVACORE_MAIL_PASSWORD=APP_PASSWORD_OR_PROVIDER_PASSWORD
-AVACORE_MAIL_FROM=ROBOT_MAIL@gmail.com
-AVACORE_MAIL_ALLOWED_TO=YOUR_MAIL@gmail.com
-
+# -----------------------------------------------------------------------------
+# Vision
+# -----------------------------------------------------------------------------
 AVACORE_VISION_ENABLED=1
 AVACORE_VISION_MODEL=HuggingFaceTB/SmolVLM2-500M-Video-Instruct
 AVACORE_VISION_PROMPT=
@@ -180,17 +210,32 @@ AVACORE_VISION_ON_LOOSE_IMAGES=1
 AVACORE_VISION_MIN_IMAGE_PIXELS=90000
 AVACORE_VISION_MAX_NEW_TOKENS=64
 
-AVACORE_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
-AVACORE_KNOWLEDGE_INBOX_PDF=./data/knowledge/inbox/pdf
-AVACORE_KNOWLEDGE_INBOX_IMAGES=./data/knowledge/inbox/images
-AVACORE_KNOWLEDGE_PROCESSED_DIR=./data/knowledge/processed
-AVACORE_KNOWLEDGE_PDF_IMAGES_DIR=./data/knowledge/processed/pdf_images
-AVACORE_KNOWLEDGE_IMAGE_TEXT_DIR=./data/knowledge/processed/image_text
-AVACORE_KNOWLEDGE_INDEX_DIR=./data/knowledge/index
-AVACORE_RAG_CHUNK_SIZE=800
-AVACORE_RAG_CHUNK_OVERLAP=120
-AVACORE_OCR_ENABLED=1
-AVACORE_OCR_MIN_TEXT_LENGTH=10
+# -----------------------------------------------------------------------------
+# Mail / IMAP / SMTP
+# -----------------------------------------------------------------------------
+AVACORE_MAIL_IMAP_HOST=imap.gmail.com
+AVACORE_MAIL_IMAP_PORT=993
+AVACORE_MAIL_SMTP_HOST=smtp.gmail.com
+AVACORE_MAIL_SMTP_PORT=587
+AVACORE_MAIL_USERNAME=
+AVACORE_MAIL_PASSWORD=
+AVACORE_MAIL_FROM=
+AVACORE_MAIL_ALLOWED_TO=
+
+# -----------------------------------------------------------------------------
+# Optional feeds
+# -----------------------------------------------------------------------------
+AVACORE_DEFAULT_LOCATION=Zurich
+AVACORE_MEDIUM_FEEDS=
+AVACORE_NEWS_FEEDS=
+#------------------------------------------------------------------------------
+# RTSP camera - For the D-Link DCS-5222L
+AVACORE_CAMERA_ENABLED=1
+AVACORE_CAMERA_USER=admin
+AVACORE_CAMERA_PASSWORD=
+AVACORE_CAMERA_IP=192.168.8.184
+AVACORE_CAMERA_RTSP_PATH=/play1.sdp
+AVACORE_CAMERA_CACHE_DIR=./data/cache/camera
 ```
 
 ## Give documents and images to Ava and vectorize them
