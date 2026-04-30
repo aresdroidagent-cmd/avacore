@@ -17,8 +17,14 @@ class SQLiteStore:
         conn.row_factory = sqlite3.Row
         return conn
 
+    def connect(self) -> sqlite3.Connection:
+        return self._connect()
+
     def _utcnow(self) -> str:
         return datetime.utcnow().isoformat(timespec="seconds")
+
+    def init_db(self) -> None:
+        self._init_schema()
 
     def _init_schema(self) -> None:
         with self._connect() as conn:
@@ -42,7 +48,7 @@ class SQLiteStore:
                     session_id TEXT NOT NULL,
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    timestamp TEXT NOT NULL
                 )
                 """
             )
@@ -83,11 +89,29 @@ class SQLiteStore:
 
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS policies (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    domain TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    rule_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    scope_type TEXT NOT NULL DEFAULT 'global',
+                    scope_value TEXT NOT NULL DEFAULT '*'
+                )
+                """
+            )
+
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS knowledge_documents (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_path TEXT NOT NULL UNIQUE,
+                    doc_type TEXT NOT NULL,
                     title TEXT NOT NULL,
-                    doc_type TEXT NOT NULL DEFAULT '',
-                    source_path TEXT NOT NULL DEFAULT '',
+                    checksum TEXT NOT NULL,
+                    status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
@@ -102,11 +126,10 @@ class SQLiteStore:
                 CREATE TABLE IF NOT EXISTS knowledge_chunks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     document_id INTEGER NOT NULL,
-                    page_number INTEGER,
+                    chunk_index INTEGER NOT NULL,
                     content TEXT NOT NULL,
-                    embedding_ref TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    page_number INTEGER,
+                    created_at TEXT NOT NULL
                 )
                 """
             )
@@ -121,11 +144,13 @@ class SQLiteStore:
                 """
                 CREATE TABLE IF NOT EXISTS knowledge_images (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    document_id INTEGER NOT NULL,
+                    document_id INTEGER,
+                    source_path TEXT NOT NULL,
+                    image_path TEXT NOT NULL,
                     page_number INTEGER,
-                    image_path TEXT NOT NULL DEFAULT '',
-                    caption TEXT NOT NULL DEFAULT '',
-                    ocr_text TEXT NOT NULL DEFAULT '',
+                    caption TEXT,
+                    ocr_text TEXT,
+                    checksum TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
@@ -145,27 +170,19 @@ class SQLiteStore:
                     scope TEXT NOT NULL DEFAULT 'user',
                     title TEXT NOT NULL,
                     content TEXT NOT NULL,
-
                     memory_type TEXT NOT NULL DEFAULT 'note',
                     status TEXT NOT NULL DEFAULT 'candidate',
-
                     source_type TEXT NOT NULL DEFAULT 'chat',
                     source_ref TEXT NOT NULL DEFAULT '',
-
                     confidence REAL NOT NULL DEFAULT 0.0,
                     importance INTEGER NOT NULL DEFAULT 0,
-
                     tags TEXT NOT NULL DEFAULT '',
-
                     created_from_user_text TEXT NOT NULL DEFAULT '',
                     created_from_assistant_text TEXT NOT NULL DEFAULT '',
-
                     verified_by TEXT NOT NULL DEFAULT '',
                     verified_at TEXT NOT NULL DEFAULT '',
-
                     rejected_by TEXT NOT NULL DEFAULT '',
                     rejected_at TEXT NOT NULL DEFAULT '',
-
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
@@ -230,7 +247,7 @@ class SQLiteStore:
         with self._connect() as conn:
             cur = conn.execute(
                 """
-                INSERT INTO messages (session_id, role, content, created_at)
+                INSERT INTO messages (session_id, role, content, timestamp)
                 VALUES (?, ?, ?, ?)
                 """,
                 (session_id, role, content, now),
@@ -289,6 +306,19 @@ class SQLiteStore:
             conn.commit()
             return int(cur.lastrowid)
 
+    def memory_exists(self, scope: str, content: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM memories
+                WHERE scope = ? AND content = ?
+                LIMIT 1
+                """,
+                (scope, content),
+            ).fetchone()
+            return row is not None
+
     def add_memory_if_new(
         self,
         scope: str,
@@ -297,25 +327,8 @@ class SQLiteStore:
         tags: str = "",
         importance: int = 0,
     ) -> int | None:
-        title_norm = (title or "").strip().lower()
-        content_norm = (content or "").strip().lower()
-
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT id
-                FROM memories
-                WHERE scope = ?
-                  AND lower(trim(title)) = ?
-                  AND lower(trim(content)) = ?
-                LIMIT 1
-                """,
-                (scope, title_norm, content_norm),
-            ).fetchone()
-
-            if row:
-                return None
-
+        if self.memory_exists(scope=scope, content=content):
+            return None
         return self.add_memory(
             scope=scope,
             title=title,
@@ -325,14 +338,17 @@ class SQLiteStore:
         )
 
     def list_memories(self, scope: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
-        query = "SELECT * FROM memories"
+        query = """
+            SELECT id, scope, title, content, tags, importance, created_at, updated_at
+            FROM memories
+        """
         params: list[Any] = []
 
         if scope:
             query += " WHERE scope = ?"
             params.append(scope)
 
-        query += " ORDER BY updated_at DESC, id DESC LIMIT ?"
+        query += " ORDER BY importance DESC, id DESC LIMIT ?"
         params.append(int(limit))
 
         with self._connect() as conn:
@@ -565,68 +581,231 @@ class SQLiteStore:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def get_active_personality_profile(self) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT profile_id, name, json_blob, active, created_at, updated_at
+                FROM personality_profiles
+                WHERE active = 1
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            return dict(row) if row else None
+
     # -------------------------------------------------------------------------
     # Knowledge documents / chunks / images
     # -------------------------------------------------------------------------
 
-    def find_knowledge_documents_by_title(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
-        query = (query or "").strip()
+    def upsert_knowledge_document(
+        self,
+        source_path: str,
+        doc_type: str,
+        title: str,
+        checksum: str,
+        status: str,
+    ) -> int:
+        now = self._utcnow()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO knowledge_documents (
+                    source_path, doc_type, title, checksum, status, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_path) DO UPDATE SET
+                    doc_type = excluded.doc_type,
+                    title = excluded.title,
+                    checksum = excluded.checksum,
+                    status = excluded.status,
+                    updated_at = excluded.updated_at
+                """,
+                (source_path, doc_type, title, checksum, status, now, now),
+            )
+            row = conn.execute(
+                "SELECT id FROM knowledge_documents WHERE source_path = ?",
+                (source_path,),
+            ).fetchone()
+            conn.commit()
+            return int(row["id"])
 
+    def replace_knowledge_chunks(self, document_id: int, chunks: list[dict[str, Any]]) -> None:
+        now = self._utcnow()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM knowledge_chunks WHERE document_id = ?", (int(document_id),))
+            for idx, chunk in enumerate(chunks):
+                conn.execute(
+                    """
+                    INSERT INTO knowledge_chunks (
+                        document_id, chunk_index, content, page_number, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        int(document_id),
+                        idx,
+                        chunk["content"],
+                        chunk.get("page_number"),
+                        now,
+                    ),
+                )
+            conn.commit()
+
+    def list_knowledge_chunks(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    kc.id,
+                    kc.document_id,
+                    kc.chunk_index,
+                    kc.content,
+                    kc.page_number,
+                    kd.title,
+                    kd.source_path
+                FROM knowledge_chunks kc
+                JOIN knowledge_documents kd ON kd.id = kc.document_id
+                ORDER BY kc.id
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_knowledge_chunk_by_id(self, chunk_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    kc.id,
+                    kc.document_id,
+                    kc.chunk_index,
+                    kc.content,
+                    kc.page_number,
+                    kd.title,
+                    kd.source_path
+                FROM knowledge_chunks kc
+                JOIN knowledge_documents kd ON kd.id = kc.document_id
+                WHERE kc.id = ?
+                """,
+                (int(chunk_id),),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def upsert_knowledge_image(
+        self,
+        document_id: int | None,
+        source_path: str,
+        image_path: str,
+        page_number: int | None,
+        caption: str,
+        ocr_text: str,
+        checksum: str,
+    ) -> int:
+        now = self._utcnow()
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT id FROM knowledge_images WHERE image_path = ? LIMIT 1",
+                (image_path,),
+            ).fetchone()
+
+            if existing:
+                image_id = int(existing["id"])
+                conn.execute(
+                    """
+                    UPDATE knowledge_images
+                    SET document_id = ?,
+                        source_path = ?,
+                        page_number = ?,
+                        caption = ?,
+                        ocr_text = ?,
+                        checksum = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        document_id,
+                        source_path,
+                        page_number,
+                        caption,
+                        ocr_text,
+                        checksum,
+                        now,
+                        image_id,
+                    ),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    INSERT INTO knowledge_images (
+                        document_id, source_path, image_path, page_number,
+                        caption, ocr_text, checksum, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        document_id,
+                        source_path,
+                        image_path,
+                        page_number,
+                        caption,
+                        ocr_text,
+                        checksum,
+                        now,
+                        now,
+                    ),
+                )
+                image_id = int(cur.lastrowid)
+
+            conn.commit()
+            return image_id
+
+    def find_knowledge_documents_by_title(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        query = (query or "").strip()
         with self._connect() as conn:
             if not query:
                 rows = conn.execute(
                     """
-                    SELECT *
+                    SELECT id, source_path, doc_type, title, checksum, status, created_at, updated_at
                     FROM knowledge_documents
-                    ORDER BY updated_at DESC, id DESC
+                    ORDER BY title
                     LIMIT ?
                     """,
                     (int(limit),),
                 ).fetchall()
             else:
-                like = f"%{query}%"
                 rows = conn.execute(
                     """
-                    SELECT *
+                    SELECT id, source_path, doc_type, title, checksum, status, created_at, updated_at
                     FROM knowledge_documents
-                    WHERE title LIKE ?
-                    ORDER BY updated_at DESC, id DESC
+                    WHERE lower(title) LIKE lower(?) OR lower(source_path) LIKE lower(?)
+                    ORDER BY title
                     LIMIT ?
                     """,
-                    (like, int(limit)),
+                    (f"%{query}%", f"%{query}%", int(limit)),
                 ).fetchall()
+            return [dict(row) for row in rows]
 
-        return [dict(row) for row in rows]
-
-    def get_knowledge_chunks_for_document_page(
-        self,
-        document_id: int,
-        page_number: int,
-    ) -> list[dict[str, Any]]:
+    def get_knowledge_chunks_for_document_page(self, document_id: int, page_number: int) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT *
-                FROM knowledge_chunks
-                WHERE document_id = ? AND page_number = ?
-                ORDER BY id ASC
+                SELECT kc.id, kc.document_id, kc.chunk_index, kc.content, kc.page_number
+                FROM knowledge_chunks kc
+                WHERE kc.document_id = ? AND kc.page_number = ?
+                ORDER BY kc.chunk_index
                 """,
                 (int(document_id), int(page_number)),
             ).fetchall()
             return [dict(row) for row in rows]
 
-    def get_knowledge_images_for_document_page(
-        self,
-        document_id: int,
-        page_number: int,
-    ) -> list[dict[str, Any]]:
+    def get_knowledge_images_for_document_page(self, document_id: int, page_number: int) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT *
+                SELECT id, document_id, source_path, image_path, page_number, caption, ocr_text, checksum, created_at, updated_at
                 FROM knowledge_images
                 WHERE document_id = ? AND page_number = ?
-                ORDER BY id ASC
+                ORDER BY id
                 """,
                 (int(document_id), int(page_number)),
             ).fetchall()

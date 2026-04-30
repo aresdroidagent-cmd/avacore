@@ -33,7 +33,7 @@ from avacore.system.ollama_runtime import start_ollama_server
 
 
 _ollama_process = None
-WEB_STATIC_DIR = Path(__file__).resolve().parents[2] / "web" / "static"
+WEB_STATIC_DIR = Path(__file__).resolve().parents[1] / "web" / "static"
 AVA_AVATAR_PATH = settings.web_avatar_path
 
 
