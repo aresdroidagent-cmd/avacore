@@ -806,6 +806,54 @@ Capture a snapshot:
 curl -X POST http://127.0.0.1:8787/camera/snapshot
 ```
 
-The API stores the snapshot in:
+### Camera cache cleanup
 
+Camera snapshots are stored in:
+
+```text
 data/cache/camera/
+```
+To prevent the disk from filling up, AvaCore includes a small cleanup script:
+```bash
+python scripts/cleanup_camera_cache.py
+```
+The script deletes camera image files older than 7 days.
+
+A weekly systemd user timer can be used:
+```bash
+systemctl --user enable --now avacore-camera-cleanup.timer
+```
+
+2) systemd User-Service anlegen
+```bash
+mkdir -p ~/.config/systemd/user
+nano ~/.config/systemd/user/avacore-camera-cleanup.service
+```
+
+[Unit]
+Description=AvaCore camera cache cleanup
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ares/avacore
+ExecStart=/home/ares/avacore/.venv/bin/python /home/ares/avacore/scripts/cleanup_camera_cache.py
+
+
+3) systemd Timer anlegen
+```bash
+nano ~/.config/systemd/user/avacore-camera-cleanup.timer
+```
+
+[Unit]
+Description=Run AvaCore camera cache cleanup weekly
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+4) Aktivieren
+systemctl --user daemon-reload
+systemctl --user enable --now avacore-camera-cleanup.timer
+
