@@ -6,6 +6,8 @@ data/sqlite/*.db
 data/logs/*
 data/cache/*
 data/history/*
+data/browser/
+data/cache/browser/
 
 # Knowledge / generated artifacts
 data/knowledge/index/
@@ -31,3 +33,5 @@ torch
 # Packaging / local artifacts
 avacore.egg-info/
 torch/
+
+.env

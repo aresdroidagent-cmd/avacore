@@ -31,7 +31,8 @@ from avacore.mail.service import MailService
 from avacore.vision.describe import describe_image_with_smolvlm, detect_image_mode
 from avacore.system.ollama_runtime import start_ollama_server
 from avacore.tools.camera_rtsp import build_rtsp_url, capture_rtsp_snapshot
-
+from avacore.tools.browser_control import BrowserController
+from avacore.tools.calendar_ics import build_daily_calendar_briefing
 
 _ollama_process = None
 WEB_STATIC_DIR = Path(__file__).resolve().parents[1] / "web" / "static"
@@ -86,6 +87,14 @@ retriever = Retriever(
 )
 auto_memory_extractor = AutoMemoryExtractor()
 mail_service = MailService()
+
+browser_controller = BrowserController(
+    user_data_dir=settings.browser_user_data_dir,
+    screenshot_dir=settings.browser_screenshot_dir,
+    headless=settings.browser_headless,
+    timeout_ms=settings.browser_timeout_ms,
+    default_search=settings.browser_default_search,
+)
 
 
 class KnowledgePageRequest(BaseModel):
@@ -181,6 +190,25 @@ class VisionDescribeRequest(BaseModel):
     image_path: str
     mode: str | None = None
     ocr_text: str = ""
+
+class BrowserOpenRequest(BaseModel):
+    url: str
+
+
+class BrowserSearchRequest(BaseModel):
+    query: str
+
+
+class BrowserTextRequest(BaseModel):
+    max_chars: int = 8000
+
+
+class BrowserScreenshotRequest(BaseModel):
+    full_page: bool = True
+
+
+class CalendarBriefingRequest(BaseModel):
+    date: str | None = None
 
 
 def load_active_personality_profile():
@@ -704,6 +732,28 @@ def personality_restore(payload: PersonalityRestoreRequest) -> dict:
     )
     return {"ok": True, "profile_id": payload.profile_id, "active": True}
 
+@app.post("/briefing/calendar")
+def briefing_calendar(
+    payload: CalendarBriefingRequest,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    if not settings.calendar_ics_url:
+        raise HTTPException(status_code=400, detail="calendar ICS URL is not configured")
+
+    try:
+        target_day = None
+        if payload.date:
+            target_day = datetime.fromisoformat(payload.date).date()
+
+        return build_daily_calendar_briefing(
+            ics_url=settings.calendar_ics_url,
+            target_day=target_day,
+            timezone=settings.daily_briefing_timezone,
+        )
+
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"calendar briefing failed: {exc}") from exc
+
 
 @app.get("/policies")
 def policies() -> dict:
@@ -1072,6 +1122,99 @@ def tools_web_fetch(payload: WebFetchRequest) -> dict:
         "url": payload.url,
         "text": shortened,
         "truncated": len(text) > len(shortened),
+    }
+
+def ensure_browser_enabled() -> None:
+    if not settings.browser_enabled:
+        raise HTTPException(status_code=400, detail="browser control is disabled")
+
+
+@app.get("/browser/status")
+def browser_status(_: None = Depends(verify_admin_password)) -> dict:
+    ensure_browser_enabled()
+    try:
+        return browser_controller.status()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"browser status failed: {exc}") from exc
+
+
+@app.post("/browser/open")
+def browser_open(
+    payload: BrowserOpenRequest,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    ensure_browser_enabled()
+    try:
+        return browser_controller.open_url(payload.url)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"browser open failed: {exc}") from exc
+
+
+@app.post("/browser/search")
+def browser_search(
+    payload: BrowserSearchRequest,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    ensure_browser_enabled()
+    try:
+        return browser_controller.search(payload.query)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"browser search failed: {exc}") from exc
+
+
+@app.post("/browser/text")
+def browser_text(
+    payload: BrowserTextRequest,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    ensure_browser_enabled()
+    try:
+        return browser_controller.get_text(max_chars=payload.max_chars)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"browser text failed: {exc}") from exc
+
+
+@app.post("/browser/screenshot")
+def browser_screenshot(
+    payload: BrowserScreenshotRequest,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    ensure_browser_enabled()
+    try:
+        return browser_controller.screenshot(full_page=payload.full_page)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"browser screenshot failed: {exc}") from exc
+
+
+@app.post("/browser/close")
+def browser_close(_: None = Depends(verify_admin_password)) -> dict:
+    ensure_browser_enabled()
+    try:
+        return browser_controller.close()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"browser close failed: {exc}") from exc
+
+
+@app.post("/calendar/browser_day")
+def calendar_browser_day(_: None = Depends(verify_admin_password)) -> dict:
+    ensure_browser_enabled()
+
+    calendar_url = "https://calendar.google.com/calendar/u/0/r/day"
+
+    try:
+        browser_controller.open_url(calendar_url)
+        page_text = browser_controller.get_text(max_chars=12000)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"calendar browser read failed: {exc}") from exc
+
+    return {
+        "ok": True,
+        "source": "browser",
+        "calendar_url": calendar_url,
+        "title": page_text.get("title", ""),
+        "url": page_text.get("url", ""),
+        "text": page_text.get("text", ""),
+        "truncated": page_text.get("truncated", False),
     }
 
 

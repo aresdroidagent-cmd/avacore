@@ -24,7 +24,10 @@ dependencies = [
   "torch>=2.2",
   "accelerate>=1.0",
   "pillow>=10.0",
-  "num2words>=0.5.14"
+  "num2words>=0.5.14",
+  "icalendar",
+  "recurring-ical-events",
+  "python-dateutil"
 ]
 
 [project.optional-dependencies]

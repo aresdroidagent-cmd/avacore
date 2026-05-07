@@ -146,6 +146,28 @@ class Settings:
         self.camera_cache_dir = Path(
             os.environ.get("AVACORE_CAMERA_CACHE_DIR", "./data/cache/camera")
         )
-
+        self.browser_enabled = os.environ.get("AVACORE_BROWSER_ENABLED", "0").strip() in {
+            "1", "true", "True", "yes", "on"
+        }
+        self.browser_headless = os.environ.get("AVACORE_BROWSER_HEADLESS", "1").strip() in {
+            "1", "true", "True", "yes", "on"
+        }
+        self.browser_user_data_dir = Path(
+            os.environ.get("AVACORE_BROWSER_USER_DATA_DIR", "./data/browser/chromium-profile")
+        ).expanduser()
+        self.browser_screenshot_dir = Path(
+            os.environ.get("AVACORE_BROWSER_SCREENSHOT_DIR", "./data/cache/browser")
+        ).expanduser()
+        self.browser_timeout_ms = int(os.environ.get("AVACORE_BROWSER_TIMEOUT_MS", "30000"))
+        self.browser_default_search = os.environ.get(
+            "AVACORE_BROWSER_DEFAULT_SEARCH",
+            "https://duckduckgo.com/?q=",
+        ).strip()
+        self.calendar_ics_url = os.environ.get("AVACORE_CALENDAR_ICS_URL", "").strip()
+        self.daily_briefing_time = os.environ.get("AVACORE_DAILY_BRIEFING_TIME", "08:30").strip()
+        self.daily_briefing_timezone = os.environ.get(
+            "AVACORE_DAILY_BRIEFING_TIMEZONE",
+            "Europe/Zurich",
+        ).strip()
 
 settings = Settings()

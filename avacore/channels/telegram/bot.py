@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import requests
+import os
 from pathlib import Path
 from telegram import Update
 from telegram.ext import (
@@ -17,6 +18,13 @@ from avacore.config.settings import settings
 
 def api_base() -> str:
     return f"http://{settings.http_host}:{settings.http_port}"
+
+
+def admin_headers() -> dict:
+    password = os.environ.get("AVACORE_WEB_ADMIN_PASSWORD", "").strip()
+    if not password:
+        return {}
+    return {"X-Admin-Password": password}
 
 
 def is_allowed_chat(chat_id: str) -> bool:
@@ -65,6 +73,7 @@ def command_help_text() -> str:
         "/mailnote <titel> | <inhalt> - wichtigen Inhalt mailen\n"
         "/camera - aktuelles Kamerabild holen\n"
         "/snapshot - Alias für /camera\n"
+        "/briefing - heutiges Kalender-Briefing abrufen\n"
     )
 
 
@@ -268,6 +277,51 @@ async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await update.effective_message.reply_text("Chatverlauf zurückgesetzt.")
+
+
+async def briefing_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
+    chat_id = str(update.effective_chat.id)
+
+    if update.effective_chat.type != "private" or not is_allowed_chat(chat_id):
+        await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
+        return
+
+    await update.effective_message.reply_text("Ich hole dein Kalender-Briefing...")
+
+    try:
+        response = requests.post(
+            f"{api_base()}/briefing/calendar",
+            json={},
+            headers=admin_headers(),
+            timeout=30,
+        )
+
+        if not response.ok:
+            try:
+                detail = response.json().get("detail", response.text)
+            except Exception:
+                detail = response.text
+
+            await update.effective_message.reply_text(
+                f"Kalender-Briefing fehlgeschlagen: {detail}"
+            )
+            return
+
+        data = response.json()
+        briefing = data.get("briefing", "").strip()
+
+        if not briefing:
+            briefing = "Kalender-Briefing erhalten, aber ohne Inhalt."
+
+        await update.effective_message.reply_text(briefing)
+
+    except Exception as exc:
+        await update.effective_message.reply_text(
+            f"Briefing-Befehl fehlgeschlagen: {exc}"
+        )
 
 
 def weather_code_label(code: int | None) -> str:
@@ -891,6 +945,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("sendmail", sendmail_cmd))
     app.add_handler(CommandHandler("mailscript", mailscript_cmd))
     app.add_handler(CommandHandler("mailnote", mailnote_cmd))
+
+    app.add_handler(CommandHandler("briefing", briefing_cmd))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
 
