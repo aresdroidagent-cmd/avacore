@@ -10,6 +10,12 @@ AvaCore is a local AI assistant core with:
 - a personality and policy layer
 - a local vision module based on Hugging Face / SmolVLM2
 
+<p>
+  <strong>Author / Autor:</strong> Roger Seeberger (Swissbot) seeberger.robotics@gmail.com<br>
+  <img src="docs/author_icon.png" alt="Author icon" width="64" />
+</p>
+
+
 ## Status
 
 Work in progress, but already usable in the environment described below.
