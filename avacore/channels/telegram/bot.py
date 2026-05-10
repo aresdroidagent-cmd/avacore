@@ -64,7 +64,9 @@ def command_help_text() -> str:
         "/mediumdigest - Medium kurz zusammenfassen\n"
         "/newsdigest - News kurz zusammenfassen\n"
         "/webfetch <url> - Rohtext einer Seite holen\n"
-        "/webask <url> <frage> - Frage zu einer Webseite beantworten\n\n"
+        "/webask <url> <frage> - Frage zu einer Webseite beantworten\n"
+        "/browsersearch <Suchbegriff> - Websuche über kontrollierten Chromium-Browser\n"
+        "/research <Frage> - Web-Recherche mit Quellen und Memory-Kandidat\n\n"
         "Mail:\n"
         "/mail - letzte Mails anzeigen\n"
         "/maildigest - Mails kurz zusammenfassen\n"
@@ -521,7 +523,8 @@ async def webask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     response = requests.post(
         f"{api_base()}/tools/web_ask",
         json={"url": url, "question": question},
-        timeout=180,
+        headers=admin_headers(),
+        timeout=60,
     )
     response.raise_for_status()
     data = response.json()
@@ -531,6 +534,87 @@ async def webask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         answer = answer[:3500] + " ..."
 
     await update.effective_message.reply_text(answer or "Keine Antwort erhalten.")
+
+async def browser_search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
+    chat_id = str(update.effective_chat.id)
+
+    if update.effective_chat.type != "private" or not is_allowed_chat(chat_id):
+        await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
+        return
+
+    query = " ".join(context.args).strip()
+
+    if not query:
+        await update.effective_message.reply_text(
+            "Bitte gib eine Suchanfrage an, z.B.:\n"
+            "/browsersearch D-Link DCS-5222L RTSP play1.sdp"
+        )
+        return
+
+    await update.effective_message.reply_text(f"Ich suche im Browser nach:\n{query}")
+
+    try:
+        search_response = requests.post(
+            f"{api_base()}/browser/search",
+            json={"query": query},
+            headers=admin_headers(),
+            timeout=60,
+        )
+
+        if not search_response.ok:
+            try:
+                detail = search_response.json().get("detail", search_response.text)
+            except Exception:
+                detail = search_response.text
+
+            await update.effective_message.reply_text(
+                f"Browser-Suche fehlgeschlagen: {detail}"
+            )
+            return
+
+        text_response = requests.post(
+            f"{api_base()}/browser/text",
+            json={"max_chars": 3000},
+            headers=admin_headers(),
+            timeout=60,
+        )
+
+        if not text_response.ok:
+            try:
+                detail = text_response.json().get("detail", text_response.text)
+            except Exception:
+                detail = text_response.text
+
+            await update.effective_message.reply_text(
+                f"Browser-Text konnte nicht gelesen werden: {detail}"
+            )
+            return
+
+        data = text_response.json()
+
+        title = data.get("title", "(ohne Titel)")
+        url = data.get("url", "")
+        text = data.get("text", "").strip()
+
+        if not text:
+            text = "Kein lesbarer Text gefunden."
+
+        message = (
+            f"Browser-Suche geöffnet.\n\n"
+            f"Titel: {title}\n"
+            f"URL: {url}\n\n"
+            f"Textauszug:\n{text[:3000]}"
+        )
+
+        await update.effective_message.reply_text(message)
+
+    except Exception as exc:
+        await update.effective_message.reply_text(
+            f"Browser-Suche fehlgeschlagen: {exc}"
+        )
 
 
 async def mail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -907,6 +991,89 @@ async def camera_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     except Exception as exc:
         await update.effective_message.reply_text(f"Kamera-Befehl fehlgeschlagen: {exc}")
 
+async def research_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
+    chat_id = str(update.effective_chat.id)
+
+    if update.effective_chat.type != "private" or not is_allowed_chat(chat_id):
+        await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
+        return
+
+    query = " ".join(context.args).strip()
+
+    if not query:
+        await update.effective_message.reply_text(
+            "Bitte gib eine Recherchefrage an, z.B.:\n"
+            "/research D-Link DCS-5222L RTSP play1.sdp"
+        )
+        return
+
+    await update.effective_message.reply_text(f"Ich recherchiere:\n{query}")
+
+    try:
+        response = requests.post(
+            f"{api_base()}/research",
+            json={
+                "query": query,
+                "max_results": 4,
+                "save_memory": True,
+            },
+            headers=admin_headers(),
+            timeout=180,
+        )
+
+        if not response.ok:
+            try:
+                detail = response.json().get("detail", response.text)
+            except Exception:
+                detail = response.text
+
+            await update.effective_message.reply_text(
+                f"Recherche fehlgeschlagen: {detail}"
+            )
+            return
+
+        data = response.json()
+
+        answer = data.get("answer", "").strip()
+        memory_id = data.get("memory_id")
+        sources = data.get("sources", [])
+
+        if not answer:
+            answer = "Recherche abgeschlossen, aber ohne Antworttext."
+
+        source_lines = []
+        for i, source in enumerate(sources[:4], start=1):
+            title = source.get("title", "(ohne Titel)")
+            url = source.get("url", "")
+            ok = source.get("ok", False)
+
+            marker = "OK" if ok else "nicht gelesen"
+            source_lines.append(f"{i}. {title} [{marker}]\n{url}")
+
+        suffix = ""
+
+        if source_lines:
+            suffix += "\n\nQuellen:\n" + "\n".join(source_lines)
+
+        if memory_id:
+            suffix += f"\n\nAls Memory-Kandidat gespeichert: #{memory_id}"
+
+        message = answer + suffix
+
+        # Telegram limit is 4096 characters.
+        if len(message) <= 3900:
+            await update.effective_message.reply_text(message)
+        else:
+            await update.effective_message.reply_text(message[:3900] + "\n\n[gekürzt]")
+
+    except Exception as exc:
+        await update.effective_message.reply_text(
+            f"Recherche-Befehl fehlgeschlagen: {exc}"
+        )
+
 
 def build_app() -> Application:
     if not settings.telegram_bot_token:
@@ -937,6 +1104,9 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("newsdigest", newsdigest_cmd))
     app.add_handler(CommandHandler("webfetch", webfetch_cmd))
     app.add_handler(CommandHandler("webask", webask_cmd))
+    app.add_handler(CommandHandler("browsersearch", browser_search_cmd))
+    app.add_handler(CommandHandler("research", research_cmd))
+
     app.add_handler(CommandHandler("camera", camera_cmd))
     app.add_handler(CommandHandler("snapshot", camera_cmd))
 

@@ -10,6 +10,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 from avacore.config.settings import settings
 from avacore.config.personality_loader import (
@@ -33,6 +34,11 @@ from avacore.system.ollama_runtime import start_ollama_server
 from avacore.tools.camera_rtsp import build_rtsp_url, capture_rtsp_snapshot
 from avacore.tools.browser_control import BrowserController
 from avacore.tools.calendar_ics import build_daily_calendar_briefing
+from avacore.tools.web_research import (
+    collect_research_sources,
+    build_research_context,
+    serialize_sources,
+)
 
 _ollama_process = None
 WEB_STATIC_DIR = Path(__file__).resolve().parents[1] / "web" / "static"
@@ -88,13 +94,36 @@ retriever = Retriever(
 auto_memory_extractor = AutoMemoryExtractor()
 mail_service = MailService()
 
-browser_controller = BrowserController(
-    user_data_dir=settings.browser_user_data_dir,
-    screenshot_dir=settings.browser_screenshot_dir,
-    headless=settings.browser_headless,
-    timeout_ms=settings.browser_timeout_ms,
-    default_search=settings.browser_default_search,
+browser_executor = ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="avacore-browser",
 )
+
+_browser_controller: BrowserController | None = None
+
+
+def get_browser_controller() -> BrowserController:
+    global _browser_controller
+
+    if _browser_controller is None:
+        _browser_controller = BrowserController(
+            user_data_dir=settings.browser_user_data_dir,
+            screenshot_dir=settings.browser_screenshot_dir,
+            headless=settings.browser_headless,
+            timeout_ms=settings.browser_timeout_ms,
+            default_search=settings.browser_default_search,
+        )
+
+    return _browser_controller
+
+
+def run_browser_task(fn, *args, **kwargs):
+    future = browser_executor.submit(fn, *args, **kwargs)
+
+    try:
+        return future.result(timeout=max(10, int(settings.browser_timeout_ms / 1000) + 10))
+    except FutureTimeoutError as exc:
+        raise HTTPException(status_code=504, detail="browser task timed out") from exc
 
 
 class KnowledgePageRequest(BaseModel):
@@ -205,6 +234,12 @@ class BrowserTextRequest(BaseModel):
 
 class BrowserScreenshotRequest(BaseModel):
     full_page: bool = True
+
+
+class ResearchRequest(BaseModel):
+    query: str
+    max_results: int | None = None
+    save_memory: bool | None = None
 
 
 class CalendarBriefingRequest(BaseModel):
@@ -1128,15 +1163,15 @@ def ensure_browser_enabled() -> None:
     if not settings.browser_enabled:
         raise HTTPException(status_code=400, detail="browser control is disabled")
 
-
 @app.get("/browser/status")
 def browser_status(_: None = Depends(verify_admin_password)) -> dict:
     ensure_browser_enabled()
     try:
-        return browser_controller.status()
+        return run_browser_task(lambda: get_browser_controller().status())
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"browser status failed: {exc}") from exc
-
 
 @app.post("/browser/open")
 def browser_open(
@@ -1145,10 +1180,11 @@ def browser_open(
 ) -> dict:
     ensure_browser_enabled()
     try:
-        return browser_controller.open_url(payload.url)
+        return run_browser_task(lambda: get_browser_controller().open_url(payload.url))
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"browser open failed: {exc}") from exc
-
 
 @app.post("/browser/search")
 def browser_search(
@@ -1157,10 +1193,11 @@ def browser_search(
 ) -> dict:
     ensure_browser_enabled()
     try:
-        return browser_controller.search(payload.query)
+        return run_browser_task(lambda: get_browser_controller().search(payload.query))
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"browser search failed: {exc}") from exc
-
 
 @app.post("/browser/text")
 def browser_text(
@@ -1169,10 +1206,11 @@ def browser_text(
 ) -> dict:
     ensure_browser_enabled()
     try:
-        return browser_controller.get_text(max_chars=payload.max_chars)
+        return run_browser_task(lambda: get_browser_controller().get_text(max_chars=payload.max_chars))
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"browser text failed: {exc}") from exc
-
 
 @app.post("/browser/screenshot")
 def browser_screenshot(
@@ -1181,19 +1219,130 @@ def browser_screenshot(
 ) -> dict:
     ensure_browser_enabled()
     try:
-        return browser_controller.screenshot(full_page=payload.full_page)
+        return run_browser_task(lambda: get_browser_controller().screenshot(full_page=payload.full_page))
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"browser screenshot failed: {exc}") from exc
+
+@app.post("/research")
+def research(
+    payload: ResearchRequest,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    if not settings.research_enabled:
+        raise HTTPException(status_code=400, detail="web research is disabled")
+
+    query = payload.query.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="research query is empty")
+
+    max_results = payload.max_results or settings.research_max_results
+    max_results = max(1, min(int(max_results), 8))
+
+    try:
+        sources = collect_research_sources(
+            query=query,
+            max_results=max_results,
+            max_chars_per_source=5000,
+        )
+
+        readable_sources = [source for source in sources if source.ok and source.text]
+
+        if not readable_sources:
+            return {
+                "ok": False,
+                "query": query,
+                "answer": "Ich habe Suchtreffer gefunden, konnte aber keine Quelle zuverlässig auslesen.",
+                "sources": serialize_sources(sources),
+                "memory_id": None,
+            }
+
+        context = build_research_context(query=query, sources=sources)
+
+        system_prompt = (
+            "Du bist Ava, ein lokaler Recherche-Assistent. "
+            "Fasse Web-Recherche sachlich und knapp zusammen. "
+            "Nutze nur die gelieferten Quellen. "
+            "Trenne klar zwischen gesicherten Informationen und Unsicherheiten. "
+            "Antworte auf Deutsch. "
+            "Wenn Quellen widersprüchlich oder schwach sind, sage das."
+        )
+
+        user_prompt = (
+            f"{context}\n\n"
+            "Aufgabe:\n"
+            "1. Beantworte die Recherchefrage kompakt.\n"
+            "2. Liste die wichtigsten gefundenen Fakten.\n"
+            "3. Nenne am Ende die verwendeten Quellen als nummerierte Liste.\n"
+            "4. Erfinde keine Details, die nicht im Quellentext stehen."
+        )
+
+        ensure_ollama_runtime()
+        answer = backend.chat(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+        )
+
+        memory_id = None
+        save_memory = (
+            settings.research_save_memory_candidate
+            if payload.save_memory is None
+            else payload.save_memory
+        )
+
+        if save_memory:
+            source_refs = "\n".join(
+                f"- {source.title}: {source.url}"
+                for source in sources
+                if source.ok
+            )
+
+            memory_content = (
+                f"Recherchefrage:\n{query}\n\n"
+                f"Zusammenfassung:\n{answer}\n\n"
+                f"Quellen:\n{source_refs}"
+            )
+
+            memory_id = store.create_memory_item(
+                scope="user",
+                title=f"Research: {query[:80]}",
+                content=memory_content,
+                memory_type="research_lead",
+                status="candidate",
+                source_type="web",
+                source_ref=source_refs,
+                confidence=0.6,
+                importance=2,
+                tags="research,web",
+                created_from_user_text=query,
+                created_from_assistant_text=answer,
+            )
+
+        return {
+            "ok": True,
+            "query": query,
+            "answer": answer,
+            "sources": serialize_sources(sources),
+            "memory_id": memory_id,
+            "memory_status": "candidate" if memory_id else None,
+        }
+
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"research failed: {exc}") from exc
 
 
 @app.post("/browser/close")
 def browser_close(_: None = Depends(verify_admin_password)) -> dict:
     ensure_browser_enabled()
     try:
-        return browser_controller.close()
+        return run_browser_task(lambda: get_browser_controller().close())
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"browser close failed: {exc}") from exc
-
 
 @app.post("/calendar/browser_day")
 def calendar_browser_day(_: None = Depends(verify_admin_password)) -> dict:
@@ -1202,8 +1351,15 @@ def calendar_browser_day(_: None = Depends(verify_admin_password)) -> dict:
     calendar_url = "https://calendar.google.com/calendar/u/0/r/day"
 
     try:
-        browser_controller.open_url(calendar_url)
-        page_text = browser_controller.get_text(max_chars=12000)
+        def task():
+            controller = get_browser_controller()
+            controller.open_url(calendar_url)
+            return controller.get_text(max_chars=12000)
+
+        page_text = run_browser_task(task)
+
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"calendar browser read failed: {exc}") from exc
 
@@ -1216,7 +1372,6 @@ def calendar_browser_day(_: None = Depends(verify_admin_password)) -> dict:
         "text": page_text.get("text", ""),
         "truncated": page_text.get("truncated", False),
     }
-
 
 @app.post("/tools/web_ask")
 def tools_web_ask(payload: WebAskRequest) -> dict:

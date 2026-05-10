@@ -163,6 +163,14 @@ class Settings:
             "AVACORE_BROWSER_DEFAULT_SEARCH",
             "https://duckduckgo.com/?q=",
         ).strip()
+        self.research_enabled = os.environ.get("AVACORE_RESEARCH_ENABLED", "1").strip() in {
+            "1", "true", "True", "yes", "on"
+        }
+        self.research_max_results = int(os.environ.get("AVACORE_RESEARCH_MAX_RESULTS", "4"))
+        self.research_save_memory_candidate = os.environ.get(
+            "AVACORE_RESEARCH_SAVE_MEMORY_CANDIDATE",
+            "1",
+       ).strip() in {"1", "true", "True", "yes", "on"}
         self.calendar_ics_url = os.environ.get("AVACORE_CALENDAR_ICS_URL", "").strip()
         self.daily_briefing_time = os.environ.get("AVACORE_DAILY_BRIEFING_TIME", "08:30").strip()
         self.daily_briefing_timezone = os.environ.get(

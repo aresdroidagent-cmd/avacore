@@ -228,6 +228,7 @@ AVACORE_MAIL_ALLOWED_TO=
 AVACORE_DEFAULT_LOCATION=Zurich
 AVACORE_MEDIUM_FEEDS=
 AVACORE_NEWS_FEEDS=
+
 #------------------------------------------------------------------------------
 # RTSP camera - For the D-Link DCS-5222L
 AVACORE_CAMERA_ENABLED=1
@@ -236,6 +237,30 @@ AVACORE_CAMERA_PASSWORD=
 AVACORE_CAMERA_IP=192.168.8.184
 AVACORE_CAMERA_RTSP_PATH=/play1.sdp
 AVACORE_CAMERA_CACHE_DIR=./data/cache/camera
+
+# -----------------------------------------------------------------------------
+# Browser control / Chromium read-only automation
+# -----------------------------------------------------------------------------
+AVACORE_BROWSER_ENABLED=0
+AVACORE_BROWSER_HEADLESS=0
+AVACORE_BROWSER_USER_DATA_DIR=./data/browser/chromium-profile
+AVACORE_BROWSER_SCREENSHOT_DIR=./data/cache/browser
+AVACORE_BROWSER_TIMEOUT_MS=30000
+AVACORE_BROWSER_DEFAULT_SEARCH=https://duckduckgo.com/?q=
+
+# -----------------------------------------------------------------------------
+# Web research
+# -----------------------------------------------------------------------------
+AVACORE_RESEARCH_ENABLED=1
+AVACORE_RESEARCH_MAX_RESULTS=4
+AVACORE_RESEARCH_SAVE_MEMORY_CANDIDATE=1
+
+# -----------------------------------------------------------------------------
+# Calendar / daily briefing
+# -----------------------------------------------------------------------------
+AVACORE_CALENDAR_ICS_URL=
+AVACORE_DAILY_BRIEFING_TIME=08:30
+AVACORE_DAILY_BRIEFING_TIMEZONE=Europe/Zurich
 ```
 
 ## Give documents and images to Ava and vectorize them
@@ -854,6 +879,116 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 4) Aktivieren
+```bash
 systemctl --user daemon-reload
 systemctl --user enable --now avacore-camera-cleanup.timer
+```
+Telegram command
+
+The Telegram bot supports:
+
+/research <question>
+
+Example:
+
+/research D-Link DCS-5222L RTSP play1.sdp
+
+Ava will:
+
+search the web
+→ collect readable sources
+→ summarize the findings
+→ list sources
+→ store the result as a memory candidate
+
+The result can later be reviewed in the AvaCore memory review UI.
+
+Memory safety model
+
+Research results are stored as:
+
+memory_type = research_lead
+status      = candidate
+source_type = web
+
+Only verified memories should be injected into Ava's trusted long-term context. This prevents weak, outdated or incorrect web findings from becoming trusted facts automatically.
+
+## Read-only browser control
+
+AvaCore includes an experimental read-only Chromium control layer based on Playwright.
+
+The first version is intentionally limited to safe read-only actions:
+
+- open URL
+- search web
+- extract visible page text
+- take screenshot
+- close browser
+
+It does not type into forms, click buttons, submit data, send emails, create calendar events or perform purchases.
+
+### Browser dependencies
+
+```bash
+cd ~/avacore
+source .venv/bin/activate
+
+pip install playwright
+python -m playwright install chromium
+python -m playwright install-deps chromium
+``````
+Browser profile and screenshots must not be committed:
+
+data/browser/
+data/cache/browser/
+
+Browser API examples
+```bash
+curl -X POST http://127.0.0.1:8787/browser/search \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-Password: YOUR_PASSWORD" \
+  -d '{"query":"D-Link DCS-5222L RTSP play1.sdp"}'
+
+curl -X POST http://127.0.0.1:8787/browser/text \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-Password: YOUR_PASSWORD" \
+  -d '{"max_chars":4000}'
+
+curl -X POST http://127.0.0.1:8787/browser/screenshot \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-Password: YOUR_PASSWORD" \
+  -d '{"full_page":true}'
+```
+
+Internally, browser actions are executed through a single worker thread because Playwright browser contexts are thread-bound.  
+
+
+## Web research and browser-assisted information gathering
+
+AvaCore can collect current information from the web through two different mechanisms:
+
+1. **Direct web fetch / web ask**
+   - Reads a specific URL.
+   - Answers a question based on that page.
+   - Used by the Telegram `/webask` command.
+
+2. **Research workflow**
+   - Searches the web.
+   - Collects several sources.
+   - Extracts readable page text.
+   - Summarizes findings with the local Ollama model.
+   - Optionally stores the result as a memory candidate for later review.
+
+The research workflow is intended for controlled information gathering, not unrestricted autonomous web browsing.
+
+### Research dependencies
+
+Install the additional dependency:
+
+```bash
+cd ~/avacore
+source .venv/bin/activate
+
+pip install beautifulsoup4
+```
 

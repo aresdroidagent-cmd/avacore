@@ -27,7 +27,8 @@ dependencies = [
   "num2words>=0.5.14",
   "icalendar",
   "recurring-ical-events",
-  "python-dateutil"
+  "python-dateutil",
+  "beautifulsoup4"
 ]
 
 [project.optional-dependencies]
