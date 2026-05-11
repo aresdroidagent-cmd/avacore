@@ -30,78 +30,224 @@ def _matches_any(text: str, patterns: tuple[str, ...]) -> bool:
 def decide_context(user_text: str) -> ContextDecision:
     text = (user_text or "").strip().lower()
 
-    decision = ContextDecision()
+    # ------------------------------------------------------------
+    # Runtime / identity questions
+    # These must never trigger web research.
+    # Ava knows these from Shared Brain + Runtime Context.
+    # ------------------------------------------------------------
+    runtime_keywords = [
+        "welches datum",
+        "was ist heute",
+        "welcher tag",
+        "heutiges datum",
+        "datum heute",
+        "wie spät",
+        "uhrzeit",
+        "welche zeit",
+        "current date",
+        "what date",
+        "what time",
+        "today",
+        "heute",
+    ]
 
-    if not text:
-        decision.reason = "empty input"
-        decision.confidence = 0.2
-        return decision
+    identity_keywords = [
+        "wie heisst du",
+        "wie heißt du",
+        "wie ist dein name",
+        "wer bist du",
+        "wer hat dich erschaffen",
+        "wer ist dein schöpfer",
+        "wer ist dein vater",
+        "wer ist roger",
+        "who are you",
+        "what is your name",
+        "who created you",
+        "who is your creator",
+        "who is your father",
+    ]
 
-    memory_terms = (
-        "erinner", "memory", "gedächtnis", "weisst du", "weißt du",
-        "wer bin ich", "wer bist du", "wer ist roger", "vater", "schöpfer",
-        "setup", "modell", "kamera", "opencv", "ollama", "avacore",
+    location_keywords = [
+        "wo bist du",
+        "wo befindest du dich",
+        "wo läufst du",
+        "wo ist dein standort",
+        "dein standort",
+        "where are you",
+        "your location",
+    ]
+
+    if any(keyword in text for keyword in runtime_keywords):
+        return ContextDecision(
+            needs_memory=True,
+            needs_rag=False,
+            needs_research=False,
+            needs_calendar=False,
+            needs_camera=False,
+            save_memory_candidate=False,
+            confidence=0.95,
+            reason="question can be answered from runtime context such as current date, time or timezone",
+        )
+
+    if any(keyword in text for keyword in identity_keywords):
+        return ContextDecision(
+            needs_memory=True,
+            needs_rag=False,
+            needs_research=False,
+            needs_calendar=False,
+            needs_camera=False,
+            save_memory_candidate=False,
+            confidence=0.95,
+            reason="question can be answered from Ava identity / Shared Brain context",
+        )
+
+    if any(keyword in text for keyword in location_keywords):
+        return ContextDecision(
+            needs_memory=True,
+            needs_rag=False,
+            needs_research=False,
+            needs_calendar=False,
+            needs_camera=False,
+            save_memory_candidate=False,
+            confidence=0.9,
+            reason="question can be answered from local runtime/location context",
+        )
+
+    # ------------------------------------------------------------
+    # Explicit tool intents
+    # ------------------------------------------------------------
+    calendar_keywords = [
+        "kalender",
+        "termin",
+        "termine",
+        "agenda",
+        "briefing",
+        "tagesaufgaben",
+        "heute vor",
+    ]
+
+    camera_keywords = [
+        "kamera",
+        "webcam",
+        "bild",
+        "snapshot",
+        "sehen",
+        "siehst du",
+    ]
+
+    if any(keyword in text for keyword in calendar_keywords):
+        return ContextDecision(
+            needs_memory=True,
+            needs_rag=False,
+            needs_research=False,
+            needs_calendar=True,
+            needs_camera=False,
+            save_memory_candidate=False,
+            confidence=0.85,
+            reason="question likely requires calendar context",
+        )
+
+    if any(keyword in text for keyword in camera_keywords):
+        return ContextDecision(
+            needs_memory=True,
+            needs_rag=False,
+            needs_research=False,
+            needs_calendar=False,
+            needs_camera=True,
+            save_memory_candidate=False,
+            confidence=0.85,
+            reason="question likely requires camera/snapshot context",
+        )
+
+    # ------------------------------------------------------------
+    # Research intent
+    # Only external/current unknown facts should trigger research.
+    # Important: 'heute' alone is NOT enough. It was already handled
+    # above as runtime context.
+    # ------------------------------------------------------------
+    research_keywords = [
+        "suche im web",
+        "recherchiere",
+        "websuche",
+        "internet",
+        "online",
+        "aktuelle version",
+        "neuste version",
+        "neueste version",
+        "latest",
+        "wo kaufen",
+        "preis",
+        "preise",
+        "lieferbar",
+        "bestellen",
+        "gesetz",
+        "news",
+        "nachrichten",
+        "release",
+        "changelog",
+        "hersteller",
+    ]
+
+    if any(keyword in text for keyword in research_keywords):
+        return ContextDecision(
+            needs_memory=True,
+            needs_rag=False,
+            needs_research=True,
+            needs_calendar=False,
+            needs_camera=False,
+            save_memory_candidate=True,
+            confidence=0.85,
+            reason="question likely requires current or external web information",
+        )
+
+    # ------------------------------------------------------------
+    # RAG / local project knowledge
+    # ------------------------------------------------------------
+    rag_keywords = [
+        "dokument",
+        "pdf",
+        "manual",
+        "seite",
+        "wissensbasis",
+        "rag",
+        "avacore",
+        "ar4",
+        "isaac",
+        "opencv",
+        "rtsp",
+        "kamera",
+        "ollama",
+        "telegram",
+        "repo",
+        "readme",
+        "setup",
+        "installation",
+        "welche version verwenden wir",
+        "was haben wir",
+    ]
+
+    if any(keyword in text for keyword in rag_keywords):
+        return ContextDecision(
+            needs_memory=True,
+            needs_rag=True,
+            needs_research=False,
+            needs_calendar=False,
+            needs_camera=False,
+            save_memory_candidate=False,
+            confidence=0.75,
+            reason="question likely relates to local project knowledge or documents",
+        )
+
+    # ------------------------------------------------------------
+    # Default: use memory, no research.
+    # ------------------------------------------------------------
+    return ContextDecision(
+        needs_memory=True,
+        needs_rag=False,
+        needs_research=False,
+        needs_calendar=False,
+        needs_camera=False,
+        save_memory_candidate=False,
+        confidence=0.55,
+        reason="default local answer path using Shared Brain and verified memory",
     )
-
-    rag_terms = (
-        "dokument", "pdf", "manual", "handbuch", "seite", "chapter", "kapitel",
-        "ar4", "ar3", "isaac", "realsense", "vorgaben", "definitionen",
-        "repo", "readme", "projekt", "pipeline", "rtsp", "d-link", "dcs-5222l",
-    )
-
-    research_terms = (
-        "suche", "recherch", "web", "internet", "google", "aktuell", "neueste",
-        "latest", "today", "heute", "preis", "kaufen", "wo bekomme", "version aktuell",
-        "release", "news", "hersteller", "datenblatt", "shop", "bestellen",
-    )
-
-    calendar_terms = (
-        "kalender", "termin", "termine", "briefing", "tagesaufgaben", "agenda", "heute vor",
-    )
-
-    camera_terms = (
-        "kamera", "bild", "snapshot", "foto", "sehen", "webcam", "rtsp",
-    )
-
-    if _contains_any(text, memory_terms):
-        decision.needs_memory = True
-        decision.reason = "question references identity, memory or known setup"
-        decision.confidence = max(decision.confidence, 0.75)
-
-    if _contains_any(text, rag_terms):
-        decision.needs_rag = True
-        decision.reason = "question likely benefits from local project/RAG knowledge"
-        decision.confidence = max(decision.confidence, 0.75)
-
-    if _contains_any(text, research_terms):
-        decision.needs_research = True
-        decision.save_memory_candidate = True
-        decision.reason = "question likely requires current or external web information"
-        decision.confidence = max(decision.confidence, 0.85)
-
-    if _contains_any(text, calendar_terms):
-        decision.needs_calendar = True
-        decision.reason = "question references calendar or daily briefing"
-        decision.confidence = max(decision.confidence, 0.8)
-
-    if _contains_any(text, camera_terms):
-        decision.needs_camera = True
-        decision.reason = "question references camera or visual input"
-        decision.confidence = max(decision.confidence, 0.7)
-
-    explicit_research = _matches_any(text, (r"^/research\b", r"\brecherchiere\b", r"\bsuche im web\b"))
-    if explicit_research:
-        decision.needs_research = True
-        decision.save_memory_candidate = True
-        decision.reason = "explicit research request"
-        decision.confidence = 0.95
-
-    # Local first: if it is clearly about AvaCore/project setup and not explicitly current,
-    # prefer memory/RAG over web research.
-    if decision.needs_rag and not explicit_research:
-        current_markers = ("aktuell", "neueste", "latest", "preis", "kaufen", "bestellen", "news")
-        if not _contains_any(text, current_markers):
-            decision.needs_research = False
-            decision.save_memory_candidate = False
-
-    return decision
