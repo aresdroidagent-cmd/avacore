@@ -671,7 +671,7 @@ Add these values to `.env`:
 ```env
 AVACORE_HTTP_HOST=0.0.0.0
 AVACORE_HTTP_PORT=8787
-AVACORE_WEB_ADMIN_PASSWORD=change_me_in_lan
+AVACORE_WEB_ADMIN_PASSWORD=YOUR_PASSWORD
 ```
 
 Then open in a browser:
