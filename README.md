@@ -1,84 +1,94 @@
-# avacore
+# AvaCore
 
-AvaCore is a local AI assistant core with:
+AvaCore is a local AI assistant core for Roger Seeberger's workstation and LAN environment. It combines a local Ollama language model, Telegram, FastAPI, document/image RAG, SQLite memory, web research, camera snapshots, calendar briefings and a shared long-term brain.
 
-- an Ollama backend for chat LLMs
-- a Telegram bot
-- an HTTP API via FastAPI
-- RAG for PDFs and images
-- SQLite-based memory
-- a personality and policy layer
-- a local vision module based on Hugging Face / SmolVLM2
+The goal is not a toy chatbot. AvaCore is intended as a practical local assistant that can help with robotics, computer vision, AI engineering, research, documentation, automation and project continuity over longer periods of time.
 
 <p>
   <strong>Author / Autor:</strong> Roger Seeberger (Swissbot) seeberger.robotics@gmail.com<br>
   <img src="docs/author_icon.png" alt="Author icon" width="64" />
 </p>
 
+## Current status
 
-## Status
+AvaCore is work in progress, but usable in the validated local setup described below.
 
-Work in progress, but already usable in the environment described below.
+Main capabilities:
 
-## Validated setup
+- local chat backend through Ollama
+- FastAPI HTTP API
+- Telegram bot interface
+- web UI for chat, status, admin and memory review
+- RAG over PDFs, extracted text and images
+- local image description through SmolVLM2
+- SQLite session and memory store
+- reviewed long-term memory workflow: `candidate`, `verified`, `rejected`
+- shared brain files for identity, user context, operating rules and curated memory
+- web research with source collection and memory candidates
+- read-only browser control through Chromium / Playwright
+- RTSP camera snapshot support
+- private iCal calendar briefing
+- optional IMAP/SMTP mail tools
 
-This setup has been tested in the following environment:
+## Validated environment
+
+The current low-VRAM profile has been tested with:
 
 - Ubuntu 20.04.x
 - Python 3.10
 - NVIDIA Quadro RTX 4000 with 8 GB VRAM
-- CUDA 13.0 / PyTorch
 - Ollama 0.20.3
+- local model: `gemma4:e2b`
 
-Models already used in this setup:
+Other systems may work, but this README focuses on a reproducible local installation.
 
-- `gemma4:e2b`
-- `qwen2.5:3b-instruct-32k`
-- `qwen2.5:3b-instruct`
-- `llama3.2:3b-32k`
-- `llama3.2:3b`
-- `lfm2.5-thinking:latest`
+## Repository layout
 
-# Create Models with bigger Standard-Ollama-Context
-```bash
-cat > ~/Modelfile.llama3.2-3b-32k <<'EOF'
-FROM llama3.2:3b
-PARAMETER num_ctx 32768
-EOF
+Important paths:
 
-ollama create llama3.2:3b-32k -f ~/Modelfile.llama3.2-3b-32k
+```text
+avacore/
+├── avacore/
+│   ├── api/              # FastAPI app
+│   ├── channels/telegram # Telegram bot
+│   ├── core/             # shared brain and decision router
+│   ├── memory/           # SQLite store and memory logic
+│   ├── model/            # Ollama backend
+│   ├── rag/              # document/image retrieval
+│   ├── tools/            # camera, calendar, web, browser, mail helpers
+│   ├── vision/           # SmolVLM / image description
+│   └── web/static/       # web UI assets
+├── data/
+│   ├── brain/            # SOUL.md, USER.md, OPERATING.md, MEMORY.md, daily notes
+│   ├── knowledge/        # PDF/image inbox, processed files and vector index
+│   ├── sqlite/           # local SQLite database
+│   ├── cache/            # camera/browser cache
+│   └── logs/             # runtime logs
+├── scripts/
+└── tests/
 ```
-## Project overview
 
-Important entry points and modules:
+## System packages
 
-- `scripts/run_api.py` starts the HTTP API
-- `scripts/run_telegram.py` starts the Telegram bot
-- `avacore/api/http_app.py` is the central FastAPI worker
-- `avacore/model/ollama_backend.py` talks to Ollama
-- `avacore/vision/describe.py` and `avacore/vision/smolvlm_client.py` provide local image analysis
-- `avacore/memory/` contains SQLite-based session and memory logic
-- `avacore/rag/` contains embedding, chunking, and retrieval components
-
-## System requirements
-
-### Ubuntu packages
-
-At minimum:
+Install the basic Ubuntu packages:
 
 ```bash
 sudo apt update
 sudo apt install -y \
-  python3.10 python3.10-venv python3-pip \
   git curl build-essential rsync \
-  libgl1 libglib2.0-0
+  python3.10 python3.10-venv python3-pip \
+  libgl1 libglib2.0-0 ffmpeg netcat-openbsd
 ```
 
-Depending on your GPU and Torch setup, additional NVIDIA or CUDA packages may be required.
+For Playwright browser automation, system dependencies may be installed later with:
 
-## Python setup
+```bash
+python -m playwright install-deps chromium
+```
 
-Inside the repository:
+## Python environment
+
+From the repository root:
 
 ```bash
 cd ~/avacore
@@ -88,11 +98,30 @@ pip install -U pip setuptools wheel
 pip install -r requirements.txt
 ```
 
-If `requirements.txt` is incomplete, install any missing packages manually as needed.
+If newer modules are not yet part of `requirements.txt`, install the currently used optional dependencies:
 
-## Install Ollama
+```bash
+pip install \
+  beautifulsoup4 \
+  icalendar recurring-ical-events python-dateutil \
+  python-dotenv \
+  playwright
 
-Ollama must work locally before starting AvaCore.
+python -m playwright install chromium
+```
+
+For RTSP camera snapshots, keep OpenCV compatible with `numpy<2`:
+
+```bash
+pip uninstall -y opencv-python-headless opencv-python numpy
+pip install "numpy==1.26.4" "opencv-python-headless==4.10.0.84"
+```
+
+Do not install an unpinned latest `opencv-python-headless` unless the project has been updated for NumPy 2.x.
+
+## Ollama setup
+
+Ollama must work locally before AvaCore starts.
 
 Check:
 
@@ -100,96 +129,78 @@ Check:
 ollama --version
 ```
 
-Example:
-
-```bash
-ollama version is 0.20.3
-```
-
-### Pull models
+Pull the default low-VRAM model:
 
 ```bash
 ollama pull gemma4:e2b
-ollama pull qwen2.5:3b-instruct
-ollama pull llama3.2:3b
-```
-
-Then verify:
-
-```bash
 ollama list
 ```
-## open a Terminal and
+
+AvaCore can autostart Ollama if configured with `OLLAMA_AUTOSTART=1`. Manual start is also possible:
+
 ```bash
 ollama serve
 ```
 
-## Create `.env` from `.env.example`
+## Configuration
+
+Create your local `.env`:
 
 ```bash
 cd ~/avacore
 cp .env.example .env
+nano .env
 ```
 
-Then edit `.env`.
+Do not commit `.env`. It contains secrets such as Telegram tokens, iCal links, mail passwords and admin passwords.
 
-## Example `.env`
+A compact example:
 
 ```env
-# -----------------------------------------------------------------------------
 # AvaCore profile / logging
-# -----------------------------------------------------------------------------
 AVACORE_PROFILE=low_vram
 AVACORE_LOG_LEVEL=info
 AVACORE_DEBUG=0
 
-# -----------------------------------------------------------------------------
-# Paths
-# -----------------------------------------------------------------------------
+# Core paths
 AVACORE_DB_PATH=./data/sqlite/avacore.db
 AVACORE_HISTORY_DIR=./data/history
 AVACORE_PERSONALITY_PATH=./data/personality/default_personality.json
 
-# -----------------------------------------------------------------------------
+# Shared Brain
+AVACORE_BRAIN_DIR=./data/brain
+AVACORE_ASSISTANT_NAME=Ava
+AVACORE_SYSTEM_NAME=AvaCore
+AVACORE_DEFAULT_LOCATION=Zurich, Switzerland
+AVACORE_AUTO_RESEARCH=ask
+
 # HTTP / Web UI
-# -----------------------------------------------------------------------------
 AVACORE_HTTP_HOST=0.0.0.0
 AVACORE_HTTP_PORT=8787
-AVACORE_WEB_ADMIN_PASSWORD=YOUR_ADMIN_PASSWORD
+AVACORE_WEB_ADMIN_PASSWORD=change_me_in_lan
 AVACORE_WEB_AVATAR_PATH=./data/knowledge/inbox/images/synthese-bots-15.jpg
 
-# -----------------------------------------------------------------------------
 # Ollama
-# -----------------------------------------------------------------------------
 OLLAMA_AUTOSTART=1
 OLLAMA_HOST=127.0.0.1
 OLLAMA_PORT=11434
 OLLAMA_STARTUP_TIMEOUT=30
 OLLAMA_RUNTIME_LOG=./data/logs/ollama_runtime.log
-
 OLLAMA_MODEL=gemma4:e2b
 OLLAMA_TIMEOUT_MS=180000
 OLLAMA_URL=http://127.0.0.1:11434/api/chat
 
-# -----------------------------------------------------------------------------
 # Telegram
-# -----------------------------------------------------------------------------
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_ALLOWED_CHAT_ID=
 
-# -----------------------------------------------------------------------------
-# Knowledge ingestion / storage
-# -----------------------------------------------------------------------------
+# Knowledge ingestion / RAG
 AVACORE_KNOWLEDGE_INBOX_PDF=./data/knowledge/inbox/pdf
 AVACORE_KNOWLEDGE_INBOX_IMAGES=./data/knowledge/inbox/images
 AVACORE_KNOWLEDGE_PROCESSED_DIR=./data/knowledge/processed
 AVACORE_KNOWLEDGE_PDF_IMAGES_DIR=./data/knowledge/processed/pdf_images
 AVACORE_KNOWLEDGE_IMAGE_TEXT_DIR=./data/knowledge/processed/image_text
 AVACORE_KNOWLEDGE_INDEX_DIR=./data/knowledge/index
-
-# -----------------------------------------------------------------------------
-# Retrieval / embeddings
-# -----------------------------------------------------------------------------
 AVACORE_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
 AVACORE_RAG_TOP_K=6
 AVACORE_RAG_CHUNK_SIZE=800
@@ -199,15 +210,9 @@ AVACORE_RAG_MAX_CONTEXT_HITS=4
 AVACORE_RAG_MAX_SOURCES=4
 AVACORE_RAG_MAX_HITS_PER_DOC=2
 
-# -----------------------------------------------------------------------------
-# OCR
-# -----------------------------------------------------------------------------
+# OCR / Vision
 AVACORE_OCR_ENABLED=1
 AVACORE_OCR_MIN_TEXT_LENGTH=10
-
-# -----------------------------------------------------------------------------
-# Vision
-# -----------------------------------------------------------------------------
 AVACORE_VISION_ENABLED=1
 AVACORE_VISION_MODEL=HuggingFaceTB/SmolVLM2-500M-Video-Instruct
 AVACORE_VISION_PROMPT=
@@ -216,9 +221,34 @@ AVACORE_VISION_ON_LOOSE_IMAGES=1
 AVACORE_VISION_MIN_IMAGE_PIXELS=90000
 AVACORE_VISION_MAX_NEW_TOKENS=64
 
-# -----------------------------------------------------------------------------
+# Web research
+AVACORE_RESEARCH_ENABLED=1
+AVACORE_RESEARCH_MAX_RESULTS=4
+AVACORE_RESEARCH_SAVE_MEMORY_CANDIDATE=1
+
+# Browser control / Chromium read-only automation
+AVACORE_BROWSER_ENABLED=0
+AVACORE_BROWSER_HEADLESS=0
+AVACORE_BROWSER_USER_DATA_DIR=./data/browser/chromium-profile
+AVACORE_BROWSER_SCREENSHOT_DIR=./data/cache/browser
+AVACORE_BROWSER_TIMEOUT_MS=30000
+AVACORE_BROWSER_DEFAULT_SEARCH=https://duckduckgo.com/?q=
+
+# RTSP camera
+AVACORE_CAMERA_ENABLED=0
+AVACORE_CAMERA_USER=admin
+AVACORE_CAMERA_PASSWORD=
+AVACORE_CAMERA_IP=
+AVACORE_CAMERA_RTSP_PATH=/play1.sdp
+AVACORE_CAMERA_CACHE_DIR=./data/cache/camera
+
+# Calendar / daily briefing
+AVACORE_CALENDAR_ICS_URL=
+AVACORE_DAILY_BRIEFING_TIME=08:30
+AVACORE_DAILY_BRIEFING_TIMEZONE=Europe/Zurich
+AVACORE_API_URL=http://127.0.0.1:8787
+
 # Mail / IMAP / SMTP
-# -----------------------------------------------------------------------------
 AVACORE_MAIL_IMAP_HOST=imap.gmail.com
 AVACORE_MAIL_IMAP_PORT=993
 AVACORE_MAIL_SMTP_HOST=smtp.gmail.com
@@ -228,727 +258,296 @@ AVACORE_MAIL_PASSWORD=
 AVACORE_MAIL_FROM=
 AVACORE_MAIL_ALLOWED_TO=
 
-# -----------------------------------------------------------------------------
 # Optional feeds
-# -----------------------------------------------------------------------------
-AVACORE_DEFAULT_LOCATION=Zurich
 AVACORE_MEDIUM_FEEDS=
 AVACORE_NEWS_FEEDS=
-
-#------------------------------------------------------------------------------
-# RTSP camera - For the D-Link DCS-5222L
-AVACORE_CAMERA_ENABLED=1
-AVACORE_CAMERA_USER=admin
-AVACORE_CAMERA_PASSWORD=
-AVACORE_CAMERA_IP=192.168.8.184
-AVACORE_CAMERA_RTSP_PATH=/play1.sdp
-AVACORE_CAMERA_CACHE_DIR=./data/cache/camera
-
-# -----------------------------------------------------------------------------
-# Browser control / Chromium read-only automation
-# -----------------------------------------------------------------------------
-AVACORE_BROWSER_ENABLED=0
-AVACORE_BROWSER_HEADLESS=0
-AVACORE_BROWSER_USER_DATA_DIR=./data/browser/chromium-profile
-AVACORE_BROWSER_SCREENSHOT_DIR=./data/cache/browser
-AVACORE_BROWSER_TIMEOUT_MS=30000
-AVACORE_BROWSER_DEFAULT_SEARCH=https://duckduckgo.com/?q=
-
-# -----------------------------------------------------------------------------
-# Web research
-# -----------------------------------------------------------------------------
-AVACORE_RESEARCH_ENABLED=1
-AVACORE_RESEARCH_MAX_RESULTS=4
-AVACORE_RESEARCH_SAVE_MEMORY_CANDIDATE=1
-
-# -----------------------------------------------------------------------------
-# Calendar / daily briefing
-# -----------------------------------------------------------------------------
-AVACORE_CALENDAR_ICS_URL=
-AVACORE_DAILY_BRIEFING_TIME=08:30
-AVACORE_DAILY_BRIEFING_TIMEZONE=Europe/Zurich
 ```
 
-## Give documents and images to Ava and vectorize them
-
-AvaCore is meant to accept PDFs and images in dedicated inbox folders, process them, and make them searchable through semantic retrieval.
-
-### Input folders
-
-Typically:
-
-- PDFs: `./data/knowledge/inbox/pdf`
-- loose images: `./data/knowledge/inbox/images`
-
-Relevant image types in this setup are mainly:
-
-- `jpg`
-- `jpeg`
-- `png`
-- images extracted from PDFs
-
-### What happens during processing
-
-1. **PDF ingestion**
-   - PDF files are loaded.
-   - page text is extracted.
-   - embedded PDF images can be exported separately.
-2. **Chunking**
-   - long text is split into searchable chunks.
-3. **Embedding / vectorization**
-   - text chunks are embedded with the configured embedding model.
-4. **Image analysis**
-   - loose images or PDF images can also be described.
-   - OCR text and image captions become part of the searchable knowledge.
-5. **Index build**
-   - the retrieval index is created from those processed artifacts.
-
-### Relevant variables and directories
-
-- `AVACORE_KNOWLEDGE_INBOX_PDF`
-- `AVACORE_KNOWLEDGE_INBOX_IMAGES`
-- `AVACORE_KNOWLEDGE_PROCESSED_DIR`
-- `AVACORE_KNOWLEDGE_PDF_IMAGES_DIR`
-- `AVACORE_KNOWLEDGE_IMAGE_TEXT_DIR`
-- `AVACORE_KNOWLEDGE_INDEX_DIR`
-- `AVACORE_EMBEDDING_MODEL`
-- `AVACORE_RAG_CHUNK_SIZE`
-- `AVACORE_RAG_CHUNK_OVERLAP`
-- `AVACORE_OCR_ENABLED`
-- `AVACORE_OCR_MIN_TEXT_LENGTH`
-
-### Typical user workflow
-
-1. Put PDFs into `data/knowledge/inbox/pdf/`.
-2. Put images into `data/knowledge/inbox/images/`.
-3. Run the project's ingestion / indexing scripts.
-4. Ask questions about the material through the API or Telegram.
-
-### Practical notes
-
-- scanned PDFs benefit from OCR if the PDF does not contain extractable native text
-- text-heavy images should not blindly be treated as `photo`
-- technical graphics are often better handled as `diagram`
-- illustrations, posters, or paintings are better treated as `artwork`
-
-## Vision settings
-
-- leave `AVACORE_VISION_PROMPT=` empty if you want to use the built-in mode prompts
-- auto mode distinguishes between `screen`, `diagram`, `assembly`, `artwork`, and `photo`
-- for text-heavy images, slides, and screenshots, `screen` is usually better than `photo`
-- for diagrams or technical graphics, `diagram` is usually better
-- `SmolVLM2-500M` is lightweight and fast, but not fully reliable semantically
-
-## Telegram
-
-At minimum:
-
-```env
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_ALLOWED_CHAT_ID=...
-```
-# Start Project
-## 1) Put PDFs into data/knowledge/inbox/pdf
-## 2) Put images into data/knowledge/inbox/images
-## 3) Build / refresh the knowledge index
-```bash
-cd ~/avacore
-source .venv/bin/activate
-python scripts/index_knowledge.py
-```
-## 4) Start the API
-```bash
-cd ~/avacore
-source .venv/bin/activate
-python scripts/run_api.py
-```
-## 5) Start Telegram in a second terminal
-```bash
-cd ~/avacore
-source .venv/bin/activate
-python scripts/run_telegram.py
-```
-
-# Quick tests
-
-## Health
+## Initialize local folders
 
 ```bash
-curl http://127.0.0.1:8787/health
+mkdir -p \
+  data/brain/daily \
+  data/knowledge/inbox/pdf \
+  data/knowledge/inbox/images \
+  data/knowledge/processed \
+  data/knowledge/index \
+  data/cache/camera \
+  data/cache/browser \
+  data/logs \
+  data/sqlite
 ```
 
-## Model status
+## Shared Brain and long-term context
 
-```bash
-curl http://127.0.0.1:8787/model
+AvaCore uses a transparent shared-brain structure inspired by agent memory systems, but adapted for the local AvaCore architecture.
+
+Files:
+
+```text
+data/brain/SOUL.md       # Ava identity, purpose, boundaries
+data/brain/USER.md       # Roger context, working style, preferences
+data/brain/OPERATING.md  # operating rules and tool policy
+data/brain/MEMORY.md     # curated long-term memory summary
+data/brain/daily/        # daily episodic notes
 ```
 
-## Ollama tags
+At reply time, Ava can combine:
 
-```bash
-curl http://127.0.0.1:11434/api/tags
-```
+- current date, time, timezone and location context
+- Ava identity and Roger context
+- active personality profile
+- verified SQLite memories
+- local RAG hits
+- daily notes
+- decision-router hints for memory/RAG/research needs
 
-## Detect vision mode
+Core identity belongs in `SOUL.md`. Stable user/project context belongs in `USER.md` or `MEMORY.md`. Raw daily work notes belong in `data/brain/daily/YYYY-MM-DD.md`.
 
-```bash
-curl -X POST http://127.0.0.1:8787/vision/detect_mode \
-  -H "Content-Type: application/json" \
-  -d '{
-    "image_path": "/full/path/to/image.png",
-    "ocr_text": ""
-  }'
-```
+## Memory model
 
-## Describe image
+AvaCore separates unverified findings from trusted memory.
 
-```bash
-curl -X POST http://127.0.0.1:8787/vision/describe_image \
-  -H "Content-Type: application/json" \
-  -d '{
-    "image_path": "/full/path/to/image.png",
-    "ocr_text": ""
-  }'
-```
+Memory states:
 
-## Optional with an explicit mode:
+- `candidate` — collected but not trusted yet
+- `verified` — approved and usable as trusted long-term context
+- `rejected` — explicitly not used
 
-```bash
-curl -X POST http://127.0.0.1:8787/vision/describe_image \
-  -H "Content-Type: application/json" \
-  -d '{
-    "image_path": "/full/path/to/image.png",
-    "mode": "diagram",
-    "ocr_text": ""
-  }'
-```
+Typical memory types:
 
-## Gmail / IMAP / SMTP notes
-
-AvaCore uses classic IMAP/SMTP settings from `.env`, not the Gmail API.
-
-Relevant variables:
-
-```env
-AVACORE_MAIL_IMAP_HOST=imap.gmail.com
-AVACORE_MAIL_IMAP_PORT=993
-AVACORE_MAIL_SMTP_HOST=smtp.gmail.com
-AVACORE_MAIL_SMTP_PORT=587
-AVACORE_MAIL_USERNAME=your.name@gmail.com
-AVACORE_MAIL_PASSWORD=APP_PASSWORD_OR_PROVIDER_PASSWORD
-AVACORE_MAIL_FROM=your.name@gmail.com
-AVACORE_MAIL_ALLOWED_TO=target1@example.com,target2@example.com
-```
-
-Important in practice:
-
-- for personal Gmail accounts, app passwords are typically required for this kind of client, and 2-Step Verification must be enabled
-- app passwords may be unavailable if the account uses security keys only, is a work/school account, or has Advanced Protection enabled
-- app passwords are revoked after a password change and need to be recreated
-- for personal Google Accounts, IMAP has been always-on since January 2025
-- pure username/password sign-ins without modern authentication are no longer supported for Google Workspace accounts as of January 2025
-
-## Common failures
-
-### `404 ... http:127.0.0.1:11434/api/chat`
-
-The URL is malformed. It must be:
-
-```env
-OLLAMA_URL=http://127.0.0.1:11434/api/chat
-```
-
-### `{"models":[]}`
-
-Ollama is running but cannot see any models. Check `ollama list` and inspect the model store path.
-
-### Vision returns useless short answers
-
-Then the image type and the chosen mode usually do not match:
-
-- screenshot / slide / text-heavy image -> `screen`
-- technical graphic -> `diagram`
-- assembly step -> `assembly`
-- illustration / cover / painting -> `artwork`
-- real photo -> `photo`
-
-## Reproducible startup sequence
-
-1. `source .venv/bin/activate`
-2. check `ollama list`
-3. `python scripts/run_api.py`
-4. in a second terminal run `python scripts/run_telegram.py`
-5. `curl http://127.0.0.1:8787/health`
-6. optionally `curl http://127.0.0.1:11434/api/tags`
-
-## Document status
-
-This README includes:
-
-- Ollama autostart from AvaCore
-- Telegram bot usage
-- SmolVLM2-based vision path
-- notes about PDF and image vectorization
-
-
-# Telegram integration
-
-AvaCore can be connected to Telegram through a private bot interface.
-
-Requirements
-
-## You need:
-
-a Telegram bot token from BotFather
-the Telegram chat ID that is allowed to talk to AvaCore
-the HTTP API running locally, because the Telegram bot forwards requests to the API worker
-Environment variables
-
-## Set these values in .env:
-
-TELEGRAM_BOT_TOKEN=your_bot_token_here
-TELEGRAM_ALLOWED_CHAT_ID=your_private_chat_id
-How it works
-scripts/run_telegram.py starts the Telegram bot
-the bot only accepts messages from the configured private chat
-incoming Telegram messages are forwarded to the AvaCore HTTP API
-the API handles chat memory, retrieval, document lookup, vision endpoints, policies and model access
-Start Telegram
-
-## Run the API first:
-
-```bash
-cd ~/avacore
-source .venv/bin/activate
-python scripts/run_api.py
-```
-
-## Then start Telegram in a second terminal:
-
-```bash
-cd ~/avacore
-source .venv/bin/activate
-python scripts/run_telegram.py
-```
-
-## Security note
-
-The Telegram bot is intentionally restricted to one configured private chat via TELEGRAM_ALLOWED_CHAT_ID.
-If the chat ID does not match, AvaCore rejects the conversation.
-
-## Telegram commands and Ava skills
-
-AvaCore exposes a set of Telegram commands for system status, memory, documents, weather, web tools and mail actions.
-
-### Basic commands
-/start
-Start Ava and show the command overview.
-
-/help
-Show the available commands.
-
-/health
-Show AvaCore runtime status.
-
-/model
-Show the currently active Ollama model and profile.
-
-/personality
-Show the active personality configuration.
-
-/personalitybackup
-Save the current personality into SQLite.
-
-/personalityrestore <profile_id>
-Restore a stored personality profile.
-
-### Memory and policy commands
-
-/memories
-List stored memories.
-
-/remember <text>
-Store a manual memory entry.
-
-/policies
-Show active policies.
-
-/reset
-Reset the current Telegram chat history in AvaCore.
-
-### Document and knowledge commands
-
-/docs [keyword]
-List known documents from the knowledge base.
-
-/page <document name> | <page>
-Explain a specific page from a document.
-These commands rely on the indexed knowledge base.
-
-If new PDFs or images were added, run:
-python scripts/index_knowledge.py
-before expecting retrieval to use the new content.
-
-### Weather and feed commands
-
-/weather [location]
-Show a short weather summary.
-
-/medium
-Show current Medium feed entries.
-
-/news
-Show current news feed entries.
-
-/mediumdigest
-Summarize Medium feed entries.
-
-/newsdigest
-Summarize news feed entries.
-
-/camera
-/snapshot
-The Telegram bot can request a live camera snapshot.
-
-### Web commands
-
-/webfetch <url>
-Fetch raw readable page text from a URL.
-
-/webask <url> <question>
-Ask a question about a specific webpage.
-
-### Mail commands
-
-/mail
-Show recent inbox entries.
-
-/maildigest
-Summarize recent emails.
-
-/sendmail <subject> | <text>
-Send a mail to the configured default recipient.
-
-/mailscript <filename.py> | <content>
-Send Python script content by mail.
-
-/mailnote <title> | <content>
-Send an important note by mail.
-
-### The default recipient is taken from:
-
-AVACORE_MAIL_ALLOWED_TO=someone@example.com
-The Telegram bot uses the first configured address as its default mail target.
-
-### Free-text chat
-
-In addition to commands, Ava also accepts normal Telegram text messages.
-These are forwarded to the /reply API endpoint and can use:
-
-chat history
-stored memories
-retrieved document context
-the active Ollama model
-policies and personality settings
-
-## Web UI
-
-AvaCore includes a minimal browser-based UI on top of the existing FastAPI server.
-
-### Features
-
-- chat page
-- document list and page explain view
-- status page
-- admin page with read-only runtime/config view
-- password-protected admin access for LAN use
-- Ava avatar image shown in the UI
-
-### Environment
-
-Add these values to `.env`:
-
-```env
-AVACORE_HTTP_HOST=0.0.0.0
-AVACORE_HTTP_PORT=8787
-AVACORE_WEB_ADMIN_PASSWORD=YOUR_PASSWORD
-```
-
-Then open in a browser:
-
-http://127.0.0.1:8787/ui/chat
-http://127.0.0.1:8787/ui/status
-http://127.0.0.1:8787/ui/admin
-
-For LAN access, replace 127.0.0.1 with the machine IP, for example:
-
-http://192.168.x.x:8787/ui/chat
-
-### Admin access
-
-The admin page is read-only and protected by the password defined in:
-
-```env
-AVACORE_WEB_ADMIN_PASSWORD=...
-
-```
-### Current UI pages
-
-- /ui/chat
-Chat interface with document list and page explain panel.
-
-- /ui/status
-Runtime status view.
-
-- /ui/admin
-Read-only runtime/configuration view protected by password.
-
-- /ui/avatar
-
-Ava image served by the backend.
-Security note
-
-The current admin protection is intentionally simple and should only be used inside a trusted local network.
-
-- `/ui/review`
-
-This page is intended for reviewing memory candidates and managing the `candidate / verified / rejected` workflow.
-
-Like the admin page, it is intended for trusted LAN use and protected by the configured admin password.
-
-### Avatar image
-
-The web UI can display an Ava avatar image served by the backend.
-
-Set the image path in `.env`:
-
-```env
-AVACORE_WEB_AVATAR_PATH=./data/knowledge/inbox/images/synthese-bots-15.jpg
-```
-
-### Do not expose this setup directly to the internet without:
-
-a reverse proxy
-HTTPS
-stronger authentication
-
-## Memory review workflow
-
-AvaCore now supports a reviewable memory workflow with explicit status handling.
-
-### Memory states
-
-Memory items can exist in three states:
-
-- `candidate`
-- `verified`
-- `rejected`
-
-Only **verified** memory should be treated as trusted long-term memory in the main hybrid chat prompt.
-
-### Purpose
-
-This allows AvaCore to:
-
-- collect potentially useful findings
-- keep unverified facts separate from trusted memory
-- let the user verify or reject memory candidates
-- prepare the system for future agent-style research and controlled learning
-
-### Memory item model
-
-Each reviewable memory item can store:
-
-- `scope`
-- `title`
-- `content`
-- `memory_type`
-- `status`
-- `source_type`
-- `source_ref`
-- `confidence`
-- `importance`
-- `tags`
-
-Typical examples:
-
-- `environment`
+- `user_profile`
 - `project`
+- `environment`
 - `preference`
 - `workflow_rule`
 - `document_fact`
 - `web_fact`
 - `research_lead`
+- `note`
 
-### Review UI
+Only verified memories should be injected into Ava's trusted prompt context.
 
-AvaCore includes a dedicated browser page for memory review:
+Review UI:
 
-- `/ui/review`
-
-The review page allows you to:
-
-- inspect candidate memories
-- verify candidate memories
-- reject candidate memories
-- delete memory items
-
-### Review API
-
-The following endpoints are available for reviewable memory items:
-
-- `GET /memories/items`
-- `GET /memories/candidates`
-- `GET /memories/verified`
-- `GET /memories/rejected`
-- `GET /memories/items/{id}`
-- `POST /memories/items`
-- `POST /memories/items/{id}/verify`
-- `POST /memories/items/{id}/reject`
-- `DELETE /memories/items/{id}`
-
-These endpoints are protected with the admin password and require the header:
-
-```http
-X-Admin-Password: <your admin password>
+```text
+http://127.0.0.1:8787/ui/review
 ```
 
-## RTSP camera integration
+Review API endpoints are protected by `X-Admin-Password`:
 
-AvaCore can access an RTSP camera and capture snapshots through the backend API.
+```text
+GET    /memories/items
+GET    /memories/candidates
+GET    /memories/verified
+GET    /memories/rejected
+GET    /memories/items/{id}
+POST   /memories/items
+POST   /memories/items/{id}/verify
+POST   /memories/items/{id}/reject
+DELETE /memories/items/{id}
+```
 
-This was tested with a D-Link DCS-5222L camera.
+## Knowledge ingestion and RAG
 
-### OpenCV dependency
+Put source files into the inbox folders:
 
-For server usage, install the headless OpenCV package with a NumPy version compatible with AvaCore:
+```text
+data/knowledge/inbox/pdf/
+data/knowledge/inbox/images/
+```
+
+Build or refresh the knowledge index:
 
 ```bash
 cd ~/avacore
 source .venv/bin/activate
-
-pip uninstall -y opencv-python-headless opencv-python numpy
-pip install "numpy==1.26.4" "opencv-python-headless==4.10.0.84"
+python scripts/index_knowledge.py
 ```
-Do not install the newest unpinned opencv-python-headless, because recent versions may pull numpy>=2, while AvaCore currently expects numpy>=1.26,<2.
 
-Capture a snapshot:
+The pipeline extracts PDF text, chunks documents, creates embeddings, processes images/OCR when enabled and builds a local retrieval index.
+
+Practical notes:
+
+- scanned PDFs benefit from OCR
+- screenshots and slides are usually better described as `screen`
+- diagrams and technical graphics are better described as `diagram`
+- assembly/manual images are better described as `assembly`
+- real photos are better described as `photo`
+
+## Start AvaCore
+
+Terminal 1 — API:
+
 ```bash
-curl -X POST http://127.0.0.1:8787/camera/snapshot
+cd ~/avacore
+source .venv/bin/activate
+python scripts/run_api.py
 ```
 
-### Camera cache cleanup
+Terminal 2 — Telegram bot:
 
-Camera snapshots are stored in:
+```bash
+cd ~/avacore
+source .venv/bin/activate
+python scripts/run_telegram.py
+```
+
+Health checks:
+
+```bash
+curl http://127.0.0.1:8787/health
+curl http://127.0.0.1:8787/model
+curl http://127.0.0.1:11434/api/tags
+```
+
+## Web UI
+
+Available pages:
 
 ```text
-data/cache/camera/
+/ui/chat     chat interface
+/ui/status   runtime status
+/ui/admin    read-only admin/config view
+/ui/review   memory candidate review
+/ui/avatar   Ava avatar image
 ```
-To prevent the disk from filling up, AvaCore includes a small cleanup script:
+
+Local URLs:
+
+```text
+http://127.0.0.1:8787/ui/chat
+http://127.0.0.1:8787/ui/status
+http://127.0.0.1:8787/ui/admin
+http://127.0.0.1:8787/ui/review
+```
+
+For LAN usage, replace `127.0.0.1` with the machine IP.
+
+Security note: the built-in admin password is intended for a trusted local network. Do not expose AvaCore directly to the internet without reverse proxy, HTTPS and stronger authentication.
+
+## Telegram
+
+Set in `.env`:
+
+```env
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_ALLOWED_CHAT_ID=...
+```
+
+The bot only accepts messages from the configured private chat.
+
+Common commands:
+
+```text
+/start                         show command overview
+/help                          show available commands
+/health                        runtime status
+/model                         active model and profile
+/reset                         reset Telegram chat history
+/memories                      list stored memories
+/remember <text>               store a manual memory entry
+/docs [keyword]                list indexed documents
+/page <doc> | <page>           explain a specific document page
+/camera or /snapshot           request current camera image
+/briefing                      today's calendar briefing
+/research <question>           web research with sources and memory candidate
+/webfetch <url>                fetch readable page text
+/webask <url> <question>       ask a question about a specific webpage
+/mail                          recent inbox entries
+/maildigest                    summarize recent emails
+/sendmail <subject> | <body>   send mail to configured default recipient
+```
+
+Free text messages are forwarded to `/reply` and can use chat history, verified memories, RAG context, policies, personality and the active Ollama model.
+
+## Web research
+
+AvaCore has two web information paths.
+
+Direct webpage question:
+
 ```bash
-python scripts/cleanup_camera_cache.py
+curl -X POST http://127.0.0.1:8787/tools/web_ask \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-Password: YOUR_PASSWORD" \
+  -d '{"url":"https://example.com","question":"What is on this page?"}'
 ```
-The script deletes camera image files older than 7 days.
 
-A weekly systemd user timer can be used:
+Research workflow:
+
 ```bash
-systemctl --user enable --now avacore-camera-cleanup.timer
+curl -X POST http://127.0.0.1:8787/research \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-Password: YOUR_PASSWORD" \
+  -d '{
+    "query": "D-Link DCS-5222L RTSP play1.sdp",
+    "max_results": 4,
+    "save_memory": true
+  }'
 ```
 
-2) systemd User-Service anlegen
-```bash
-mkdir -p ~/.config/systemd/user
-nano ~/.config/systemd/user/avacore-camera-cleanup.service
-```
+Telegram:
 
-[Unit]
-Description=AvaCore camera cache cleanup
-
-[Service]
-Type=oneshot
-WorkingDirectory=/home/ares/avacore
-ExecStart=/home/ares/avacore/.venv/bin/python /home/ares/avacore/scripts/cleanup_camera_cache.py
-
-
-3) systemd Timer anlegen
-```bash
-nano ~/.config/systemd/user/avacore-camera-cleanup.timer
-```
-
-[Unit]
-Description=Run AvaCore camera cache cleanup weekly
-
-[Timer]
-OnCalendar=weekly
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-4) Aktivieren
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now avacore-camera-cleanup.timer
-```
-Telegram command
-
-The Telegram bot supports:
-
-/research <question>
-
-Example:
-
+```text
 /research D-Link DCS-5222L RTSP play1.sdp
+```
 
-Ava will:
+Research results are stored as memory candidates when enabled:
 
-search the web
-→ collect readable sources
-→ summarize the findings
-→ list sources
-→ store the result as a memory candidate
-
-The result can later be reviewed in the AvaCore memory review UI.
-
-Memory safety model
-
-Research results are stored as:
-
+```text
 memory_type = research_lead
 status      = candidate
 source_type = web
+```
 
-Only verified memories should be injected into Ava's trusted long-term context. This prevents weak, outdated or incorrect web findings from becoming trusted facts automatically.
+Review and verify before trusting long-term.
+
+## Decision router
+
+AvaCore includes a lightweight decision router that classifies whether a request likely needs memory, RAG, web research, calendar, camera or a memory candidate.
+
+Debug endpoint:
+
+```bash
+curl -X POST http://127.0.0.1:8787/debug/decision \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-Password: YOUR_PASSWORD" \
+  -d '{"text":"Welche OpenCV Version ist aktuell stabil?"}'
+```
+
+The router should prefer local knowledge first and use web research only when current or external information is needed.
 
 ## Read-only browser control
 
-AvaCore includes an experimental read-only Chromium control layer based on Playwright.
+AvaCore includes experimental Chromium control through Playwright.
 
-The first version is intentionally limited to safe read-only actions:
+Allowed v1 actions:
 
 - open URL
 - search web
-- extract visible page text
+- read visible page text
 - take screenshot
 - close browser
 
-It does not type into forms, click buttons, submit data, send emails, create calendar events or perform purchases.
+Not allowed in v1:
 
-### Browser dependencies
+- form submission
+- arbitrary typing
+- purchases
+- sending emails
+- creating calendar events
+- uncontrolled clicking
 
-```bash
-cd ~/avacore
-source .venv/bin/activate
+Enable only when needed:
 
-pip install playwright
-python -m playwright install chromium
-python -m playwright install-deps chromium
-``````
-Browser profile and screenshots must not be committed:
+```env
+AVACORE_BROWSER_ENABLED=1
+AVACORE_BROWSER_HEADLESS=0
+```
 
-data/browser/
-data/cache/browser/
+Examples:
 
-Browser API examples
 ```bash
 curl -X POST http://127.0.0.1:8787/browser/search \
   -H "Content-Type: application/json" \
@@ -966,35 +565,313 @@ curl -X POST http://127.0.0.1:8787/browser/screenshot \
   -d '{"full_page":true}'
 ```
 
-Internally, browser actions are executed through a single worker thread because Playwright browser contexts are thread-bound.  
+Browser actions are executed through one worker thread because Playwright contexts are thread-bound.
 
+## RTSP camera snapshots
 
-## Web research and browser-assisted information gathering
+Enable in `.env`:
 
-AvaCore can collect current information from the web through two different mechanisms:
+```env
+AVACORE_CAMERA_ENABLED=1
+AVACORE_CAMERA_USER=admin
+AVACORE_CAMERA_PASSWORD=
+AVACORE_CAMERA_IP=192.168.8.184
+AVACORE_CAMERA_RTSP_PATH=/play1.sdp
+AVACORE_CAMERA_CACHE_DIR=./data/cache/camera
+```
 
-1. **Direct web fetch / web ask**
-   - Reads a specific URL.
-   - Answers a question based on that page.
-   - Used by the Telegram `/webask` command.
+For the D-Link DCS-5222L with empty password, the working URL format is:
 
-2. **Research workflow**
-   - Searches the web.
-   - Collects several sources.
-   - Extracts readable page text.
-   - Summarizes findings with the local Ollama model.
-   - Optionally stores the result as a memory candidate for later review.
+```text
+rtsp://admin:@192.168.8.184:554/play1.sdp
+```
 
-The research workflow is intended for controlled information gathering, not unrestricted autonomous web browsing.
+Snapshot API:
 
-### Research dependencies
+```bash
+curl -X POST http://127.0.0.1:8787/camera/snapshot
+```
 
-Install the additional dependency:
+Telegram:
+
+```text
+/camera
+/snapshot
+```
+
+Cleanup old camera snapshots manually:
+
+```bash
+python scripts/cleanup_camera_cache.py
+```
+
+Systemd user timer example:
+
+```ini
+# ~/.config/systemd/user/avacore-camera-cleanup.service
+[Unit]
+Description=AvaCore camera cache cleanup
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ares/avacore
+ExecStart=/home/ares/avacore/.venv/bin/python /home/ares/avacore/scripts/cleanup_camera_cache.py
+```
+
+```ini
+# ~/.config/systemd/user/avacore-camera-cleanup.timer
+[Unit]
+Description=Run AvaCore camera cache cleanup weekly
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Activate:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now avacore-camera-cleanup.timer
+```
+
+## Calendar briefing
+
+AvaCore uses a private iCal URL for read-only calendar access. This avoids Google OAuth and browser-login problems.
+
+Set in `.env`:
+
+```env
+AVACORE_CALENDAR_ICS_URL=https://calendar.google.com/calendar/ical/.../basic.ics
+AVACORE_DAILY_BRIEFING_TIME=08:30
+AVACORE_DAILY_BRIEFING_TIMEZONE=Europe/Zurich
+```
+
+Keep the iCal URL secret. Anyone with this URL can read the calendar feed.
+
+API:
+
+```bash
+curl -X POST http://127.0.0.1:8787/briefing/calendar \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-Password: YOUR_PASSWORD" \
+  -d '{}'
+```
+
+Telegram:
+
+```text
+/briefing
+```
+
+Automatic daily Telegram briefing script:
+
+```bash
+python scripts/send_daily_briefing.py
+```
+
+Systemd user timer example:
+
+```ini
+# ~/.config/systemd/user/avacore-daily-briefing.service
+[Unit]
+Description=AvaCore daily Telegram briefing
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ares/avacore
+EnvironmentFile=/home/ares/avacore/.env
+ExecStart=/home/ares/avacore/.venv/bin/python /home/ares/avacore/scripts/send_daily_briefing.py
+```
+
+```ini
+# ~/.config/systemd/user/avacore-daily-briefing.timer
+[Unit]
+Description=Run AvaCore daily briefing every morning
+
+[Timer]
+OnCalendar=*-*-* 08:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Activate:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now avacore-daily-briefing.timer
+```
+
+The timer expects the AvaCore API to be running.
+
+## Vision endpoints
+
+Detect image mode:
+
+```bash
+curl -X POST http://127.0.0.1:8787/vision/detect_mode \
+  -H "Content-Type: application/json" \
+  -d '{"image_path":"/full/path/to/image.png","ocr_text":""}'
+```
+
+Describe image:
+
+```bash
+curl -X POST http://127.0.0.1:8787/vision/describe_image \
+  -H "Content-Type: application/json" \
+  -d '{"image_path":"/full/path/to/image.png","mode":"diagram","ocr_text":""}'
+```
+
+## Mail / IMAP / SMTP
+
+AvaCore uses classic IMAP/SMTP settings from `.env`, not the Gmail API.
+
+Relevant variables:
+
+```env
+AVACORE_MAIL_IMAP_HOST=imap.gmail.com
+AVACORE_MAIL_IMAP_PORT=993
+AVACORE_MAIL_SMTP_HOST=smtp.gmail.com
+AVACORE_MAIL_SMTP_PORT=587
+AVACORE_MAIL_USERNAME=your.name@gmail.com
+AVACORE_MAIL_PASSWORD=APP_PASSWORD_OR_PROVIDER_PASSWORD
+AVACORE_MAIL_FROM=your.name@gmail.com
+AVACORE_MAIL_ALLOWED_TO=target@example.com
+```
+
+For personal Gmail accounts, app passwords are typically required and 2-Step Verification must be enabled.
+
+## Git hygiene
+
+Never commit:
+
+```text
+.env
+.venv/
+__pycache__/
+*.pyc
+data/cache/
+data/browser/
+data/logs/
+data/sqlite/
+data/knowledge/processed/
+data/knowledge/index/
+*.jpg
+*.png
+```
+
+Before committing:
+
+```bash
+git status
+git diff --cached --stat
+```
+
+## Common problems
+
+### `Ollama URL malformed`
+
+Use:
+
+```env
+OLLAMA_URL=http://127.0.0.1:11434/api/chat
+```
+
+Not:
+
+```text
+http:127.0.0.1:11434/api/chat
+```
+
+### `ollama list` shows no models
+
+Check whether Ollama is running and which model store it uses. Start with:
+
+```bash
+ollama serve
+ollama list
+```
+
+### OpenCV upgraded NumPy to 2.x
+
+Repair the venv:
+
+```bash
+pip uninstall -y opencv-python-headless opencv-python numpy
+pip install "numpy==1.26.4" "opencv-python-headless==4.10.0.84"
+```
+
+### Playwright error: `cannot switch to a different thread`
+
+Browser actions must run in the dedicated single browser worker. Restart the API after changing browser-control code:
+
+```bash
+pkill -f "python scripts/run_api.py"
+pkill -f "uvicorn"
+python scripts/run_api.py
+```
+
+### Google Calendar login blocked in Playwright
+
+Use the private iCal URL instead of browser login. This is the supported path for daily briefing.
+
+## Recommended first validation sequence
 
 ```bash
 cd ~/avacore
 source .venv/bin/activate
 
-pip install beautifulsoup4
+python -m py_compile avacore/api/http_app.py
+python -m py_compile avacore/core/brain.py
+python -m py_compile avacore/core/decision.py
+python -m py_compile avacore/tools/web_research.py
+python -m py_compile avacore/tools/calendar_ics.py
+python -m py_compile avacore/tools/camera_rtsp.py
+python -m py_compile avacore/channels/telegram/bot.py
+
+python scripts/index_knowledge.py
+python scripts/run_api.py
 ```
 
+In a second terminal:
+
+```bash
+cd ~/avacore
+source .venv/bin/activate
+python scripts/run_telegram.py
+```
+
+Then test:
+
+```bash
+curl http://127.0.0.1:8787/health
+curl http://127.0.0.1:8787/model
+```
+
+In Telegram:
+
+```text
+/health
+/model
+/briefing
+/research D-Link DCS-5222L RTSP play1.sdp
+```
+
+## Current design principle
+
+AvaCore should prefer local verified knowledge before using the web:
+
+```text
+Shared Brain
+→ verified SQLite memories
+→ local RAG / documents
+→ web research only when current or external information is needed
+→ research results become candidates, not trusted facts
+```
+
+This is the basis for Ava becoming a useful long-term project assistant instead of a stateless chatbot.

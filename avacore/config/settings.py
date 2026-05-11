@@ -177,5 +177,9 @@ class Settings:
             "AVACORE_DAILY_BRIEFING_TIMEZONE",
             "Europe/Zurich",
         ).strip()
+        self.brain_dir = Path(os.environ.get("AVACORE_BRAIN_DIR", "./data/brain")).expanduser()
+        self.assistant_name = os.environ.get("AVACORE_ASSISTANT_NAME", "Ava").strip()
+        self.system_name = os.environ.get("AVACORE_SYSTEM_NAME", "AvaCore").strip()
+        self.auto_research = os.environ.get("AVACORE_AUTO_RESEARCH", "ask").strip().lower()
 
 settings = Settings()

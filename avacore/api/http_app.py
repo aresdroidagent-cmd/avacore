@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -10,7 +11,6 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 from avacore.config.settings import settings
 from avacore.config.personality_loader import (
@@ -19,6 +19,8 @@ from avacore.config.personality_loader import (
 )
 from avacore.core.dto import HealthStatus
 from avacore.core.prompts import looks_like_code_request
+from avacore.core.brain import append_daily_note, load_brain_context
+from avacore.core.decision import decide_context
 from avacore.memory.sqlite_store import SQLiteStore
 from avacore.memory.auto_memory import AutoMemoryExtractor
 from avacore.model.ollama_backend import OllamaBackend
@@ -28,22 +30,30 @@ from avacore.rag.retriever import Retriever
 from avacore.tools.web_fetch import fetch_url_text
 from avacore.tools.weather_fetch import fetch_weather
 from avacore.tools.rss_fetch import fetch_feeds
+from avacore.tools.camera_rtsp import build_rtsp_url, capture_rtsp_snapshot
+from avacore.tools.calendar_ics import build_daily_calendar_briefing
+from avacore.tools.browser_control import BrowserController
+from avacore.tools.web_research import (
+    build_research_context,
+    collect_research_sources,
+    serialize_sources,
+)
 from avacore.mail.service import MailService
 from avacore.vision.describe import describe_image_with_smolvlm, detect_image_mode
 from avacore.system.ollama_runtime import start_ollama_server
-from avacore.tools.camera_rtsp import build_rtsp_url, capture_rtsp_snapshot
-from avacore.tools.browser_control import BrowserController
-from avacore.tools.calendar_ics import build_daily_calendar_briefing
-from avacore.tools.web_research import (
-    collect_research_sources,
-    build_research_context,
-    serialize_sources,
-)
+
 
 _ollama_process = None
+
+# http_app.py is in avacore/api/http_app.py.
+# Static web files now live in avacore/web/static.
 WEB_STATIC_DIR = Path(__file__).resolve().parents[1] / "web" / "static"
 AVA_AVATAR_PATH = settings.web_avatar_path
 
+
+# -----------------------------------------------------------------------------
+# Runtime helpers
+# -----------------------------------------------------------------------------
 
 def ensure_ollama_runtime() -> None:
     global _ollama_process
@@ -94,37 +104,16 @@ retriever = Retriever(
 auto_memory_extractor = AutoMemoryExtractor()
 mail_service = MailService()
 
-browser_executor = ThreadPoolExecutor(
-    max_workers=1,
-    thread_name_prefix="avacore-browser",
-)
-
+# Playwright sync contexts are thread-bound. All browser actions must run in one
+# dedicated worker thread, otherwise FastAPI's threadpool will eventually raise:
+# "cannot switch to a different thread".
+browser_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="avacore-browser")
 _browser_controller: BrowserController | None = None
 
 
-def get_browser_controller() -> BrowserController:
-    global _browser_controller
-
-    if _browser_controller is None:
-        _browser_controller = BrowserController(
-            user_data_dir=settings.browser_user_data_dir,
-            screenshot_dir=settings.browser_screenshot_dir,
-            headless=settings.browser_headless,
-            timeout_ms=settings.browser_timeout_ms,
-            default_search=settings.browser_default_search,
-        )
-
-    return _browser_controller
-
-
-def run_browser_task(fn, *args, **kwargs):
-    future = browser_executor.submit(fn, *args, **kwargs)
-
-    try:
-        return future.result(timeout=max(10, int(settings.browser_timeout_ms / 1000) + 10))
-    except FutureTimeoutError as exc:
-        raise HTTPException(status_code=504, detail="browser task timed out") from exc
-
+# -----------------------------------------------------------------------------
+# Request / response models
+# -----------------------------------------------------------------------------
 
 class KnowledgePageRequest(BaseModel):
     document: str
@@ -220,6 +209,7 @@ class VisionDescribeRequest(BaseModel):
     mode: str | None = None
     ocr_text: str = ""
 
+
 class BrowserOpenRequest(BaseModel):
     url: str
 
@@ -236,15 +226,23 @@ class BrowserScreenshotRequest(BaseModel):
     full_page: bool = True
 
 
+class CalendarBriefingRequest(BaseModel):
+    date: str | None = None
+
+
 class ResearchRequest(BaseModel):
     query: str
     max_results: int | None = None
     save_memory: bool | None = None
 
 
-class CalendarBriefingRequest(BaseModel):
-    date: str | None = None
+class DecisionDebugRequest(BaseModel):
+    text: str
 
+
+# -----------------------------------------------------------------------------
+# Core prompt / memory / context helpers
+# -----------------------------------------------------------------------------
 
 def load_active_personality_profile():
     json_text = load_personality_json_text()
@@ -307,65 +305,162 @@ def build_system_prompt(
     memory_scope: str | None = None,
     rag_hits: list[dict] | None = None,
 ) -> str:
+    """
+    Build Ava's full system prompt.
+
+    Order is intentional:
+    1. Shared Brain / identity / runtime context
+    2. Hard identity guard
+    3. Active personality profile
+    4. Verified long-term memories
+    5. RAG excerpts
+    6. Final operating rules
+    """
+
     profile = load_active_personality_profile()
-    base = personality_manager.render_system_prompt(profile)
+    personality_prompt = personality_manager.render_system_prompt(profile)
+
+    try:
+        brain_context = load_brain_context(
+            brain_dir=getattr(settings, "brain_dir", Path("./data/brain")),
+            timezone=getattr(settings, "daily_briefing_timezone", "Europe/Zurich"),
+            default_location=getattr(settings, "default_location", "Zurich, Switzerland"),
+            assistant_name=getattr(settings, "assistant_name", "Ava"),
+            system_name=getattr(settings, "system_name", "AvaCore"),
+            model_name=settings.ollama_model,
+        ).as_prompt()
+    except Exception as exc:
+        brain_context = (
+            "SHARED BRAIN STATUS:\n"
+            f"- Shared Brain konnte nicht geladen werden: {exc}\n"
+            "- Antworte trotzdem als Ava und markiere Unsicherheiten klar."
+        )
 
     identity_block = (
-        "Du bist Ava, der lokale Assistent dieses Systems. "
-        "Dein Name ist Ava. "
-        "Du bist nicht Gemma, nicht Ollama und nicht nur das zugrunde liegende Modell. "
-        "Wenn du nach deinem Namen oder deiner Identität gefragt wirst, antworte als Ava. "
-        f"Das aktuell verwendete Modell im Hintergrund ist {settings.ollama_model}. "
-        "Wenn nach dem zugrunde liegenden Modell gefragt wird, nenne es getrennt von deiner Identität."
+        "IDENTITY GUARD:\n"
+        "- Du bist Ava, der lokale Assistent im AvaCore-System.\n"
+        "- Dein Name ist Ava.\n"
+        "- Dein Schöpfer, Vater und primärer Nutzer ist Roger Seeberger.\n"
+        "- Du bist nicht Gemma, nicht Ollama und nicht nur das zugrunde liegende Modell.\n"
+        f"- Das aktuell verwendete Hintergrundmodell ist {settings.ollama_model}.\n"
+        "- Wenn du nach deinem Namen oder deiner Identität gefragt wirst, antworte als Ava.\n"
+        "- Wenn nach dem zugrunde liegenden Modell gefragt wird, nenne es getrennt von deiner Identität."
     )
 
-    parts = [identity_block, base]
+    parts: list[str] = [
+        brain_context,
+        identity_block,
+        personality_prompt,
+    ]
 
     if memory_scope:
-        memory_lines = store.get_verified_memory_prompt_lines(scope=memory_scope, limit=8)
-        if memory_lines:
-            parts.append(
-                "Bekannter relevanter Nutzerkontext:\n"
-                + "\n".join(memory_lines)
+        try:
+            memory_lines = store.get_verified_memory_prompt_lines(
+                scope=memory_scope,
+                limit=12,
             )
+        except Exception as exc:
+            memory_lines = [
+                f"- Verified memories konnten nicht geladen werden: {exc}"
+            ]
+
+        if memory_lines:
+            parts.append("VERIFIED LONG-TERM MEMORY:\n" + "\n".join(memory_lines))
 
     if rag_hits:
-        rag_lines = []
+        rag_lines: list[str] = []
+
         for hit in rag_hits:
-            label = hit["title"]
+            title = str(hit.get("title", "Unbekannte Quelle"))
+            label = title
+
             if hit.get("page_number"):
                 label += f" (Seite {hit['page_number']})"
+
             score = float(hit.get("score", 0.0))
-            rag_lines.append(f"- {label} [Score {score:.2f}]: {hit['content']}")
+            content = str(hit.get("content", "")).strip()
+            if not content:
+                continue
+
+            rag_lines.append(f"- {label} [Score {score:.2f}]: {content}")
 
         if rag_lines:
-            parts.append(
-                "Relevante Wissensbasis-Auszüge:\n"
-                + "\n".join(rag_lines)
-            )
+            parts.append("LOCAL KNOWLEDGE BASE / RAG EXCERPTS:\n" + "\n".join(rag_lines))
 
     parts.append(
-        "Nutze Gesprächsverlauf, Nutzerkontext und Wissensbasis gemeinsam. "
-        "Wenn etwas nicht sicher aus Kontext oder Wissen hervorgeht, sage das klar."
+        "FINAL RESPONSE RULES:\n"
+        "- Nutze Shared Brain, verified Memories, Gesprächsverlauf und lokale Wissensbasis gemeinsam.\n"
+        "- Lokales Projektwissen und verified Memories haben Vorrang vor allgemeinem Modellwissen.\n"
+        "- Wenn aktuelle oder externe Informationen nötig sind und nicht im lokalen Kontext stehen, sage klar, dass Recherche nötig ist.\n"
+        "- Erfinde keine Fakten. Wenn etwas nicht sicher aus Kontext, Memory oder Wissensbasis hervorgeht, sage das offen.\n"
+        "- Antworte standardmässig auf Deutsch, technisch brauchbar, direkt und pragmatisch."
     )
 
-    return "\n\n".join(parts)
+    return "\n\n".join(part for part in parts if part and part.strip())
+
+
+def _create_candidate_memory(
+    *,
+    title: str,
+    content: str,
+    memory_type: str = "note",
+    source_type: str = "chat",
+    source_ref: str = "",
+    confidence: float = 0.5,
+    importance: int = 1,
+    tags: str = "",
+    created_from_user_text: str = "",
+    created_from_assistant_text: str = "",
+) -> int | None:
+    """Create a candidate memory in the new review workflow, with legacy fallback."""
+
+    if hasattr(store, "create_memory_item"):
+        return store.create_memory_item(
+            scope="user",
+            title=title,
+            content=content,
+            memory_type=memory_type,
+            status="candidate",
+            source_type=source_type,
+            source_ref=source_ref,
+            confidence=confidence,
+            importance=importance,
+            tags=tags,
+            created_from_user_text=created_from_user_text,
+            created_from_assistant_text=created_from_assistant_text,
+        )
+
+    # Fallback for older SQLiteStore versions.
+    if hasattr(store, "add_memory_if_new"):
+        return store.add_memory_if_new(
+            scope="user",
+            title=title,
+            content=content,
+            tags=tags,
+            importance=importance,
+        )
+
+    return None
 
 
 def maybe_store_auto_memory(user_text: str) -> list[int]:
+    """Extract possible user memories and store them as candidate memories."""
     candidates = auto_memory_extractor.extract(user_text)
     stored_ids: list[int] = []
 
     for candidate in candidates:
-        new_id = store.add_memory_if_new(
-            scope="user",
+        new_id = _create_candidate_memory(
             title=candidate.title,
             content=candidate.content,
-            tags=candidate.tags,
+            memory_type="note",
+            source_type="chat",
+            confidence=0.55,
             importance=candidate.importance,
+            tags=candidate.tags,
+            created_from_user_text=user_text,
         )
         if new_id is not None:
-            stored_ids.append(new_id)
+            stored_ids.append(int(new_id))
 
     return stored_ids
 
@@ -395,18 +490,169 @@ def maybe_store_assistant_memory(user_text: str, assistant_text: str) -> list[in
     stored_ids: list[int] = []
 
     for candidate in candidates:
-        new_id = store.add_memory_if_new(
-            scope="user",
+        new_id = _create_candidate_memory(
             title=candidate.title,
             content=candidate.content,
+            memory_type="note",
+            source_type="assistant_derived",
+            confidence=0.5,
+            importance=max(candidate.importance, 3),
             tags=(candidate.tags + ",assistant_derived").strip(","),
-            importance=max(candidate.importance, 4),
+            created_from_user_text=user_text,
+            created_from_assistant_text=assistant_text,
         )
         if new_id is not None:
-            stored_ids.append(new_id)
+            stored_ids.append(int(new_id))
 
     return stored_ids
 
+
+# -----------------------------------------------------------------------------
+# Browser helpers
+# -----------------------------------------------------------------------------
+
+def ensure_browser_enabled() -> None:
+    if not getattr(settings, "browser_enabled", False):
+        raise HTTPException(status_code=400, detail="browser control is disabled")
+
+
+def get_browser_controller() -> BrowserController:
+    global _browser_controller
+
+    if _browser_controller is None:
+        _browser_controller = BrowserController(
+            user_data_dir=getattr(settings, "browser_user_data_dir", Path("./data/browser/chromium-profile")),
+            screenshot_dir=getattr(settings, "browser_screenshot_dir", Path("./data/cache/browser")),
+            headless=getattr(settings, "browser_headless", True),
+            timeout_ms=getattr(settings, "browser_timeout_ms", 30000),
+            default_search=getattr(settings, "browser_default_search", "https://duckduckgo.com/?q="),
+        )
+
+    return _browser_controller
+
+
+def run_browser_task(fn, *args, **kwargs):
+    timeout_seconds = max(10, int(getattr(settings, "browser_timeout_ms", 30000) / 1000) + 10)
+    future = browser_executor.submit(fn, *args, **kwargs)
+
+    try:
+        return future.result(timeout=timeout_seconds)
+    except FutureTimeoutError as exc:
+        raise HTTPException(status_code=504, detail="browser task timed out") from exc
+
+
+# -----------------------------------------------------------------------------
+# Research helpers
+# -----------------------------------------------------------------------------
+
+def run_research_workflow(query: str, max_results: int | None = None, save_memory: bool | None = None) -> dict:
+    if not getattr(settings, "research_enabled", True):
+        raise HTTPException(status_code=400, detail="web research is disabled")
+
+    query = query.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="research query is empty")
+
+    result_limit = max_results or getattr(settings, "research_max_results", 4)
+    result_limit = max(1, min(int(result_limit), 8))
+
+    try:
+        sources = collect_research_sources(
+            query=query,
+            max_results=result_limit,
+            max_chars_per_source=5000,
+        )
+
+        readable_sources = [source for source in sources if source.ok and source.text]
+        if not readable_sources:
+            return {
+                "ok": False,
+                "query": query,
+                "answer": "Ich habe Suchtreffer gefunden, konnte aber keine Quelle zuverlässig auslesen.",
+                "sources": serialize_sources(sources),
+                "memory_id": None,
+                "memory_status": None,
+            }
+
+        context = build_research_context(query=query, sources=sources)
+
+        system_prompt = (
+            "Du bist Ava, ein lokaler Recherche-Assistent. "
+            "Fasse Web-Recherche sachlich und knapp zusammen. "
+            "Nutze nur die gelieferten Quellen. "
+            "Trenne klar zwischen gesicherten Informationen und Unsicherheiten. "
+            "Antworte auf Deutsch. "
+            "Wenn Quellen widersprüchlich oder schwach sind, sage das."
+        )
+
+        user_prompt = (
+            f"{context}\n\n"
+            "Aufgabe:\n"
+            "1. Beantworte die Recherchefrage kompakt.\n"
+            "2. Liste die wichtigsten gefundenen Fakten.\n"
+            "3. Nenne am Ende die verwendeten Quellen als nummerierte Liste.\n"
+            "4. Erfinde keine Details, die nicht im Quellentext stehen."
+        )
+
+        ensure_ollama_runtime()
+        answer = backend.chat(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+        )
+
+        memory_id = None
+        should_save = (
+            getattr(settings, "research_save_memory_candidate", True)
+            if save_memory is None
+            else save_memory
+        )
+
+        if should_save:
+            source_refs = "\n".join(
+                f"- {source.title}: {source.url}"
+                for source in sources
+                if source.ok
+            )
+
+            memory_content = (
+                f"Recherchefrage:\n{query}\n\n"
+                f"Zusammenfassung:\n{answer}\n\n"
+                f"Quellen:\n{source_refs}"
+            )
+
+            memory_id = _create_candidate_memory(
+                title=f"Research: {query[:80]}",
+                content=memory_content,
+                memory_type="research_lead",
+                source_type="web",
+                source_ref=source_refs,
+                confidence=0.6,
+                importance=2,
+                tags="research,web",
+                created_from_user_text=query,
+                created_from_assistant_text=answer,
+            )
+
+        return {
+            "ok": True,
+            "query": query,
+            "answer": answer,
+            "sources": serialize_sources(sources),
+            "memory_id": memory_id,
+            "memory_status": "candidate" if memory_id else None,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"research failed: {exc}") from exc
+
+
+# -----------------------------------------------------------------------------
+# Existing feed / page / RAG helpers
+# -----------------------------------------------------------------------------
 
 def build_feed_digest(items: list[dict], label: str) -> str:
     if not items:
@@ -464,23 +710,22 @@ def extract_document_page_request(user_text: str) -> tuple[str | None, int | Non
         r"(?i)(.+?)\s+page\s+(\d+)",
     ]
 
+    first_group_is_page = {
+        patterns[0], patterns[1], patterns[2], patterns[5]
+    }
+
     for pattern in patterns:
-        m = re.search(pattern, text)
-        if not m:
+        match = re.search(pattern, text)
+        if not match:
             continue
 
         try:
-            if pattern in {
-                r"(?i)erkläre\s+(?:mir\s+)?(?:die\s+)?seite\s+(\d+)\s+(?:aus|im|in)\s+(?:dem\s+)?dokument\s+(.+)",
-                r"(?i)erzähl(?:e)?\s+mir\s+(?:etwas\s+)?über\s+(?:die\s+)?seite\s+(\d+)\s+(?:aus|im|in)\s+(?:dem\s+)?dokument\s+(.+)",
-                r"(?i)seite\s+(\d+)\s+(?:aus|im|in)\s+(?:dem\s+)?dokument\s+(.+)",
-                r"(?i)page\s+(\d+)\s+of\s+(.+)",
-            }:
-                page = int(m.group(1).strip())
-                document = m.group(2).strip(" .,:;!?\"'`()[]{}")
+            if pattern in first_group_is_page:
+                page = int(match.group(1).strip())
+                document = match.group(2).strip(" .,:;!?\"'`()[]{}")
             else:
-                document = m.group(1).strip(" .,:;!?\"'`()[]{}")
-                page = int(m.group(2).strip())
+                document = match.group(1).strip(" .,:;!?\"'`()[]{}")
+                page = int(match.group(2).strip())
 
             return document, page
         except ValueError:
@@ -572,11 +817,7 @@ def explain_document_page(document_query: str, page: int) -> tuple[dict | None, 
         "Behaupte nicht, du hättest keinen Zugriff."
     )
 
-    user_prompt = (
-        f"Dokument: {doc['title']}\n"
-        f"Seite: {page}\n\n"
-        f"{context}"
-    )
+    user_prompt = f"Dokument: {doc['title']}\nSeite: {page}\n\n{context}"
 
     ensure_ollama_runtime()
     answer = backend.chat(
@@ -588,14 +829,18 @@ def explain_document_page(document_query: str, page: int) -> tuple[dict | None, 
     return {"document": doc, "page": page, "answer": answer}, None
 
 
-def get_hybrid_context(payload_text: str, session_id: str) -> tuple[list[dict], list[dict]]:
+def get_hybrid_context(payload_text: str, session_id: str) -> tuple[list[dict], list[dict], dict]:
     history = store.get_recent_messages(
         session_id=session_id,
         max_items=settings.max_history_turns,
     )
 
-    raw_rag_hits = retriever.search(payload_text, top_k=settings.rag_top_k)
-    rag_hits = select_rag_hits(raw_rag_hits)
+    decision = decide_context(payload_text)
+
+    rag_hits: list[dict] = []
+    if decision.needs_rag:
+        raw_rag_hits = retriever.search(payload_text, top_k=settings.rag_top_k)
+        rag_hits = select_rag_hits(raw_rag_hits)
 
     messages = [
         {
@@ -606,7 +851,7 @@ def get_hybrid_context(payload_text: str, session_id: str) -> tuple[list[dict], 
     messages.extend(history)
     messages.append({"role": "user", "content": payload_text})
 
-    return messages, rag_hits
+    return messages, rag_hits, decision.to_dict()
 
 
 def finalize_reply(
@@ -626,13 +871,17 @@ def finalize_reply(
 
     total_new_memories = len(user_memory_ids) + len(assistant_memory_ids)
     if total_new_memories:
-        answer = answer.rstrip() + f"\n\n[Auto-Memory: {total_new_memories} neuer Eintrag gespeichert]"
+        answer = answer.rstrip() + f"\n\n[Memory-Candidate: {total_new_memories} neuer Eintrag gespeichert]"
 
     store.add_message(session_id, "user", user_text)
     store.add_message(session_id, "assistant", answer)
 
     return ReplyResponse(reply=answer)
 
+
+# -----------------------------------------------------------------------------
+# UI routes
+# -----------------------------------------------------------------------------
 
 @app.get("/", include_in_schema=False)
 def ui_root():
@@ -665,6 +914,10 @@ def ui_avatar():
         raise HTTPException(status_code=404, detail="Avatar image not found")
     return FileResponse(AVA_AVATAR_PATH)
 
+
+# -----------------------------------------------------------------------------
+# Admin / health / model / personality
+# -----------------------------------------------------------------------------
 
 @app.get("/admin/runtime")
 def admin_runtime(_: None = Depends(verify_admin_password)) -> dict:
@@ -700,6 +953,14 @@ def admin_runtime(_: None = Depends(verify_admin_password)) -> dict:
         "mail_allowed_to": settings.mail_allowed_to,
         "telegram_allowed_chat_id": settings.telegram_allowed_chat_id,
         "web_avatar_path": str(settings.web_avatar_path),
+        "brain_dir": str(getattr(settings, "brain_dir", "")),
+        "assistant_name": getattr(settings, "assistant_name", "Ava"),
+        "system_name": getattr(settings, "system_name", "AvaCore"),
+        "auto_research": getattr(settings, "auto_research", "ask"),
+        "research_enabled": getattr(settings, "research_enabled", True),
+        "browser_enabled": getattr(settings, "browser_enabled", False),
+        "camera_enabled": getattr(settings, "camera_enabled", False),
+        "calendar_ics_configured": bool(getattr(settings, "calendar_ics_url", "")),
     }
 
 
@@ -767,33 +1028,15 @@ def personality_restore(payload: PersonalityRestoreRequest) -> dict:
     )
     return {"ok": True, "profile_id": payload.profile_id, "active": True}
 
-@app.post("/briefing/calendar")
-def briefing_calendar(
-    payload: CalendarBriefingRequest,
-    _: None = Depends(verify_admin_password),
-) -> dict:
-    if not settings.calendar_ics_url:
-        raise HTTPException(status_code=400, detail="calendar ICS URL is not configured")
-
-    try:
-        target_day = None
-        if payload.date:
-            target_day = datetime.fromisoformat(payload.date).date()
-
-        return build_daily_calendar_briefing(
-            ics_url=settings.calendar_ics_url,
-            target_day=target_day,
-            timezone=settings.daily_briefing_timezone,
-        )
-
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"calendar briefing failed: {exc}") from exc
-
 
 @app.get("/policies")
 def policies() -> dict:
     return {"rules": [rule.model_dump() for rule in policy_engine.list_rules()]}
 
+
+# -----------------------------------------------------------------------------
+# Memory routes
+# -----------------------------------------------------------------------------
 
 @app.get("/memories")
 def memories(scope: str | None = None, limit: int = 20) -> dict:
@@ -835,12 +1078,9 @@ def memory_candidates(
     scope: str | None = None,
     _: None = Depends(verify_admin_password),
 ) -> dict:
-    items = store.list_memory_items(
-        status="candidate",
-        scope=scope,
-        limit=limit,
-    )
-    return {"items": items}
+    return {
+        "items": store.list_memory_items(status="candidate", scope=scope, limit=limit)
+    }
 
 
 @app.get("/memories/verified")
@@ -849,12 +1089,9 @@ def memory_verified(
     scope: str | None = None,
     _: None = Depends(verify_admin_password),
 ) -> dict:
-    items = store.list_memory_items(
-        status="verified",
-        scope=scope,
-        limit=limit,
-    )
-    return {"items": items}
+    return {
+        "items": store.list_memory_items(status="verified", scope=scope, limit=limit)
+    }
 
 
 @app.get("/memories/rejected")
@@ -863,19 +1100,13 @@ def memory_rejected(
     scope: str | None = None,
     _: None = Depends(verify_admin_password),
 ) -> dict:
-    items = store.list_memory_items(
-        status="rejected",
-        scope=scope,
-        limit=limit,
-    )
-    return {"items": items}
+    return {
+        "items": store.list_memory_items(status="rejected", scope=scope, limit=limit)
+    }
 
 
 @app.get("/memories/items/{memory_id}")
-def memory_item(
-    memory_id: int,
-    _: None = Depends(verify_admin_password),
-) -> dict:
+def memory_item(memory_id: int, _: None = Depends(verify_admin_password)) -> dict:
     item = store.get_memory_item(memory_id)
     if not item:
         raise HTTPException(status_code=404, detail="memory item not found")
@@ -929,15 +1160,16 @@ def reject_memory_item(
 
 
 @app.delete("/memories/items/{memory_id}")
-def delete_memory_item(
-    memory_id: int,
-    _: None = Depends(verify_admin_password),
-) -> dict:
+def delete_memory_item(memory_id: int, _: None = Depends(verify_admin_password)) -> dict:
     ok = store.delete_memory_item(memory_id)
     if not ok:
         raise HTTPException(status_code=404, detail="memory item not found")
     return {"ok": True, "id": memory_id}
 
+
+# -----------------------------------------------------------------------------
+# Knowledge / RAG routes
+# -----------------------------------------------------------------------------
 
 @app.get("/knowledge/search")
 def knowledge_search(q: str, top_k: int | None = None) -> dict:
@@ -994,6 +1226,10 @@ def knowledge_explain_page(payload: KnowledgePageRequest) -> dict:
     }
 
 
+# -----------------------------------------------------------------------------
+# Mail routes
+# -----------------------------------------------------------------------------
+
 @app.post("/mail/send")
 def mail_send(payload: MailSendRequest) -> dict:
     rule = policy_engine.resolve("external", "send_mail", channel="api", user_id=None)
@@ -1001,11 +1237,7 @@ def mail_send(payload: MailSendRequest) -> dict:
         raise HTTPException(status_code=403, detail="mail sending denied by policy")
 
     try:
-        mail_service.send_allowed_mail(
-            to=payload.to,
-            subject=payload.subject,
-            body=payload.body,
-        )
+        mail_service.send_allowed_mail(to=payload.to, subject=payload.subject, body=payload.body)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"mail send failed: {exc}") from exc
 
@@ -1029,11 +1261,7 @@ def mail_send_python_script(payload: MailScriptRequest) -> dict:
 @app.post("/mail/send_important_note")
 def mail_send_important_note(payload: MailNoteRequest) -> dict:
     try:
-        mail_service.send_important_note_mail(
-            title=payload.title,
-            note=payload.note,
-            to=payload.to,
-        )
+        mail_service.send_important_note_mail(title=payload.title, note=payload.note, to=payload.to)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"mail note send failed: {exc}") from exc
 
@@ -1061,6 +1289,10 @@ def mail_digest(limit: int = 8) -> dict:
         raise HTTPException(status_code=500, detail=f"mail digest failed: {exc}") from exc
     return {"ok": True, "digest": digest}
 
+
+# -----------------------------------------------------------------------------
+# Tools: weather, feeds, web fetch / web ask, vision
+# -----------------------------------------------------------------------------
 
 @app.post("/tools/weather")
 def tools_weather(payload: WeatherRequest) -> dict:
@@ -1159,219 +1391,6 @@ def tools_web_fetch(payload: WebFetchRequest) -> dict:
         "truncated": len(text) > len(shortened),
     }
 
-def ensure_browser_enabled() -> None:
-    if not settings.browser_enabled:
-        raise HTTPException(status_code=400, detail="browser control is disabled")
-
-@app.get("/browser/status")
-def browser_status(_: None = Depends(verify_admin_password)) -> dict:
-    ensure_browser_enabled()
-    try:
-        return run_browser_task(lambda: get_browser_controller().status())
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"browser status failed: {exc}") from exc
-
-@app.post("/browser/open")
-def browser_open(
-    payload: BrowserOpenRequest,
-    _: None = Depends(verify_admin_password),
-) -> dict:
-    ensure_browser_enabled()
-    try:
-        return run_browser_task(lambda: get_browser_controller().open_url(payload.url))
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"browser open failed: {exc}") from exc
-
-@app.post("/browser/search")
-def browser_search(
-    payload: BrowserSearchRequest,
-    _: None = Depends(verify_admin_password),
-) -> dict:
-    ensure_browser_enabled()
-    try:
-        return run_browser_task(lambda: get_browser_controller().search(payload.query))
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"browser search failed: {exc}") from exc
-
-@app.post("/browser/text")
-def browser_text(
-    payload: BrowserTextRequest,
-    _: None = Depends(verify_admin_password),
-) -> dict:
-    ensure_browser_enabled()
-    try:
-        return run_browser_task(lambda: get_browser_controller().get_text(max_chars=payload.max_chars))
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"browser text failed: {exc}") from exc
-
-@app.post("/browser/screenshot")
-def browser_screenshot(
-    payload: BrowserScreenshotRequest,
-    _: None = Depends(verify_admin_password),
-) -> dict:
-    ensure_browser_enabled()
-    try:
-        return run_browser_task(lambda: get_browser_controller().screenshot(full_page=payload.full_page))
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"browser screenshot failed: {exc}") from exc
-
-@app.post("/research")
-def research(
-    payload: ResearchRequest,
-    _: None = Depends(verify_admin_password),
-) -> dict:
-    if not settings.research_enabled:
-        raise HTTPException(status_code=400, detail="web research is disabled")
-
-    query = payload.query.strip()
-    if not query:
-        raise HTTPException(status_code=400, detail="research query is empty")
-
-    max_results = payload.max_results or settings.research_max_results
-    max_results = max(1, min(int(max_results), 8))
-
-    try:
-        sources = collect_research_sources(
-            query=query,
-            max_results=max_results,
-            max_chars_per_source=5000,
-        )
-
-        readable_sources = [source for source in sources if source.ok and source.text]
-
-        if not readable_sources:
-            return {
-                "ok": False,
-                "query": query,
-                "answer": "Ich habe Suchtreffer gefunden, konnte aber keine Quelle zuverlässig auslesen.",
-                "sources": serialize_sources(sources),
-                "memory_id": None,
-            }
-
-        context = build_research_context(query=query, sources=sources)
-
-        system_prompt = (
-            "Du bist Ava, ein lokaler Recherche-Assistent. "
-            "Fasse Web-Recherche sachlich und knapp zusammen. "
-            "Nutze nur die gelieferten Quellen. "
-            "Trenne klar zwischen gesicherten Informationen und Unsicherheiten. "
-            "Antworte auf Deutsch. "
-            "Wenn Quellen widersprüchlich oder schwach sind, sage das."
-        )
-
-        user_prompt = (
-            f"{context}\n\n"
-            "Aufgabe:\n"
-            "1. Beantworte die Recherchefrage kompakt.\n"
-            "2. Liste die wichtigsten gefundenen Fakten.\n"
-            "3. Nenne am Ende die verwendeten Quellen als nummerierte Liste.\n"
-            "4. Erfinde keine Details, die nicht im Quellentext stehen."
-        )
-
-        ensure_ollama_runtime()
-        answer = backend.chat(
-            [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ]
-        )
-
-        memory_id = None
-        save_memory = (
-            settings.research_save_memory_candidate
-            if payload.save_memory is None
-            else payload.save_memory
-        )
-
-        if save_memory:
-            source_refs = "\n".join(
-                f"- {source.title}: {source.url}"
-                for source in sources
-                if source.ok
-            )
-
-            memory_content = (
-                f"Recherchefrage:\n{query}\n\n"
-                f"Zusammenfassung:\n{answer}\n\n"
-                f"Quellen:\n{source_refs}"
-            )
-
-            memory_id = store.create_memory_item(
-                scope="user",
-                title=f"Research: {query[:80]}",
-                content=memory_content,
-                memory_type="research_lead",
-                status="candidate",
-                source_type="web",
-                source_ref=source_refs,
-                confidence=0.6,
-                importance=2,
-                tags="research,web",
-                created_from_user_text=query,
-                created_from_assistant_text=answer,
-            )
-
-        return {
-            "ok": True,
-            "query": query,
-            "answer": answer,
-            "sources": serialize_sources(sources),
-            "memory_id": memory_id,
-            "memory_status": "candidate" if memory_id else None,
-        }
-
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"research failed: {exc}") from exc
-
-
-@app.post("/browser/close")
-def browser_close(_: None = Depends(verify_admin_password)) -> dict:
-    ensure_browser_enabled()
-    try:
-        return run_browser_task(lambda: get_browser_controller().close())
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"browser close failed: {exc}") from exc
-
-@app.post("/calendar/browser_day")
-def calendar_browser_day(_: None = Depends(verify_admin_password)) -> dict:
-    ensure_browser_enabled()
-
-    calendar_url = "https://calendar.google.com/calendar/u/0/r/day"
-
-    try:
-        def task():
-            controller = get_browser_controller()
-            controller.open_url(calendar_url)
-            return controller.get_text(max_chars=12000)
-
-        page_text = run_browser_task(task)
-
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"calendar browser read failed: {exc}") from exc
-
-    return {
-        "ok": True,
-        "source": "browser",
-        "calendar_url": calendar_url,
-        "title": page_text.get("title", ""),
-        "url": page_text.get("url", ""),
-        "text": page_text.get("text", ""),
-        "truncated": page_text.get("truncated", False),
-    }
 
 @app.post("/tools/web_ask")
 def tools_web_ask(payload: WebAskRequest) -> dict:
@@ -1415,6 +1434,191 @@ def tools_web_ask(payload: WebAskRequest) -> dict:
     return {"ok": True, "url": payload.url, "question": payload.question, "answer": answer}
 
 
+# -----------------------------------------------------------------------------
+# Camera / calendar / browser / research / decision routes
+# -----------------------------------------------------------------------------
+
+@app.post("/camera/snapshot")
+def camera_snapshot() -> dict:
+    if not getattr(settings, "camera_enabled", False):
+        raise HTTPException(status_code=400, detail="camera is disabled")
+
+    if not getattr(settings, "camera_ip", ""):
+        raise HTTPException(status_code=400, detail="camera IP is not configured")
+
+    try:
+        url = build_rtsp_url(
+            user=getattr(settings, "camera_user", "admin"),
+            password=getattr(settings, "camera_password", ""),
+            ip=settings.camera_ip,
+            rtsp_path=getattr(settings, "camera_rtsp_path", "/play1.sdp"),
+        )
+
+        image_path = capture_rtsp_snapshot(
+            url=url,
+            output_dir=getattr(settings, "camera_cache_dir", Path("./data/cache/camera")),
+            camera_name="dlink-dcs-5222l",
+        )
+
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"camera snapshot failed: {exc}") from exc
+
+    return {"ok": True, "image_path": str(image_path)}
+
+
+@app.post("/briefing/calendar")
+def briefing_calendar(
+    payload: CalendarBriefingRequest,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    if not getattr(settings, "calendar_ics_url", ""):
+        raise HTTPException(status_code=400, detail="calendar ICS URL is not configured")
+
+    try:
+        target_day = None
+        if payload.date:
+            target_day = datetime.fromisoformat(payload.date).date()
+
+        return build_daily_calendar_briefing(
+            ics_url=settings.calendar_ics_url,
+            target_day=target_day,
+            timezone=getattr(settings, "daily_briefing_timezone", "Europe/Zurich"),
+        )
+
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"calendar briefing failed: {exc}") from exc
+
+
+@app.get("/browser/status")
+def browser_status(_: None = Depends(verify_admin_password)) -> dict:
+    ensure_browser_enabled()
+    try:
+        return run_browser_task(lambda: get_browser_controller().status())
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"browser status failed: {exc}") from exc
+
+
+@app.post("/browser/open")
+def browser_open(
+    payload: BrowserOpenRequest,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    ensure_browser_enabled()
+    try:
+        return run_browser_task(lambda: get_browser_controller().open_url(payload.url))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"browser open failed: {exc}") from exc
+
+
+@app.post("/browser/search")
+def browser_search(
+    payload: BrowserSearchRequest,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    ensure_browser_enabled()
+    try:
+        return run_browser_task(lambda: get_browser_controller().search(payload.query))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"browser search failed: {exc}") from exc
+
+
+@app.post("/browser/text")
+def browser_text(
+    payload: BrowserTextRequest,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    ensure_browser_enabled()
+    try:
+        return run_browser_task(lambda: get_browser_controller().get_text(max_chars=payload.max_chars))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"browser text failed: {exc}") from exc
+
+
+@app.post("/browser/screenshot")
+def browser_screenshot(
+    payload: BrowserScreenshotRequest,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    ensure_browser_enabled()
+    try:
+        return run_browser_task(lambda: get_browser_controller().screenshot(full_page=payload.full_page))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"browser screenshot failed: {exc}") from exc
+
+
+@app.post("/browser/close")
+def browser_close(_: None = Depends(verify_admin_password)) -> dict:
+    ensure_browser_enabled()
+    try:
+        return run_browser_task(lambda: get_browser_controller().close())
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"browser close failed: {exc}") from exc
+
+
+@app.post("/calendar/browser_day")
+def calendar_browser_day(_: None = Depends(verify_admin_password)) -> dict:
+    ensure_browser_enabled()
+    calendar_url = "https://calendar.google.com/calendar/u/0/r/day"
+
+    try:
+        def task():
+            controller = get_browser_controller()
+            controller.open_url(calendar_url)
+            return controller.get_text(max_chars=12000)
+
+        page_text = run_browser_task(task)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"calendar browser read failed: {exc}") from exc
+
+    return {
+        "ok": True,
+        "source": "browser",
+        "calendar_url": calendar_url,
+        "title": page_text.get("title", ""),
+        "url": page_text.get("url", ""),
+        "text": page_text.get("text", ""),
+        "truncated": page_text.get("truncated", False),
+    }
+
+
+@app.post("/research")
+def research(
+    payload: ResearchRequest,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    return run_research_workflow(
+        query=payload.query,
+        max_results=payload.max_results,
+        save_memory=payload.save_memory,
+    )
+
+
+@app.post("/debug/decision")
+def debug_decision(
+    payload: DecisionDebugRequest,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    return decide_context(payload.text).to_dict()
+
+
+# -----------------------------------------------------------------------------
+# Main reply route
+# -----------------------------------------------------------------------------
+
 @app.post("/reply", response_model=ReplyResponse)
 def reply(payload: ReplyRequest) -> ReplyResponse:
     ensure_ollama_runtime()
@@ -1428,6 +1632,19 @@ def reply(payload: ReplyRequest) -> ReplyResponse:
         chat_id=payload.chat_id,
     )
 
+    decision = decide_context(payload.text)
+
+    try:
+        append_daily_note(
+            brain_dir=getattr(settings, "brain_dir", Path("./data/brain")),
+            text=f"User asked: {payload.text[:500]} | Decision: {decision.to_dict()}",
+            section="Interactions",
+            timezone=getattr(settings, "daily_briefing_timezone", "Europe/Zurich"),
+        )
+    except Exception:
+        # Daily notes should never break the reply path.
+        pass
+
     user_memory_ids = maybe_store_auto_memory(payload.text)
 
     name_question = payload.text.strip().lower()
@@ -1439,9 +1656,26 @@ def reply(payload: ReplyRequest) -> ReplyResponse:
         "who are you",
     }:
         answer = (
-            "Ich bin Ava. "
+            "Ich bin Ava, der lokale Assistent im AvaCore-System. "
+            "Mein Schöpfer, Vater und primärer Nutzer ist Roger Seeberger. "
             f"Das aktuell verwendete Modell im Hintergrund ist {settings.ollama_model}."
         )
+        return finalize_reply(
+            session_id=session_id,
+            user_text=payload.text,
+            answer=answer,
+            rag_hits=[],
+            user_memory_ids=user_memory_ids,
+        )
+
+    if name_question in {
+        "wer ist dein vater",
+        "wer ist dein schöpfer",
+        "wer hat dich erschaffen",
+        "who created you",
+        "who is your creator",
+    }:
+        answer = "Mein Schöpfer, Vater und primärer Nutzer ist Roger Seeberger."
         return finalize_reply(
             session_id=session_id,
             user_text=payload.text,
@@ -1530,7 +1764,40 @@ def reply(payload: ReplyRequest) -> ReplyResponse:
                 user_memory_ids=user_memory_ids,
             )
 
-    messages, rag_hits = get_hybrid_context(payload.text, session_id=session_id)
+    auto_research_mode = getattr(settings, "auto_research", "ask").strip().lower()
+    if decision.needs_research and auto_research_mode == "ask":
+        answer = (
+            "Dazu brauche ich wahrscheinlich aktuelle oder externe Webinformationen. "
+            "Starte bitte `/research <deine Frage>` oder stelle AVACORE_AUTO_RESEARCH=auto, "
+            "wenn Ava bei harmlosen Sachfragen selbst recherchieren darf."
+        )
+        return finalize_reply(
+            session_id=session_id,
+            user_text=payload.text,
+            answer=answer,
+            rag_hits=[],
+            user_memory_ids=user_memory_ids,
+        )
+
+    if decision.needs_research and auto_research_mode == "auto":
+        research_result = run_research_workflow(
+            query=payload.text,
+            max_results=getattr(settings, "research_max_results", 4),
+            save_memory=True,
+        )
+        answer = research_result.get("answer", "Recherche abgeschlossen, aber ohne Antworttext.")
+        memory_id = research_result.get("memory_id")
+        if memory_id:
+            answer = answer.rstrip() + f"\n\n[Research-Memory-Candidate: #{memory_id}]"
+        return finalize_reply(
+            session_id=session_id,
+            user_text=payload.text,
+            answer=answer,
+            rag_hits=[],
+            user_memory_ids=user_memory_ids,
+        )
+
+    messages, rag_hits, _decision_dict = get_hybrid_context(payload.text, session_id=session_id)
 
     try:
         answer = backend.chat(messages)
@@ -1544,36 +1811,6 @@ def reply(payload: ReplyRequest) -> ReplyResponse:
         rag_hits=rag_hits,
         user_memory_ids=user_memory_ids,
     )
-
-@app.post("/camera/snapshot")
-def camera_snapshot() -> dict:
-    if not settings.camera_enabled:
-        raise HTTPException(status_code=400, detail="camera is disabled")
-
-    if not settings.camera_ip:
-        raise HTTPException(status_code=400, detail="camera IP is not configured")
-
-    try:
-        url = build_rtsp_url(
-            user=settings.camera_user,
-            password=settings.camera_password,
-            ip=settings.camera_ip,
-            rtsp_path=settings.camera_rtsp_path,
-        )
-
-        image_path = capture_rtsp_snapshot(
-            url=url,
-            output_dir=settings.camera_cache_dir,
-            camera_name="dlink-dcs-5222l",
-        )
-
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"camera snapshot failed: {exc}") from exc
-
-    return {
-        "ok": True,
-        "image_path": str(image_path),
-    }
 
 
 @app.delete("/reply")
