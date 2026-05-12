@@ -49,7 +49,7 @@ def _safe_read_text(path: Path, max_chars: int = 6000) -> str:
 
 def build_runtime_context(
     timezone: str = "Europe/Zurich",
-    default_location: str = "Zurich, Switzerland",
+    default_location: str = "Schaffhausen, Switzerland",
     assistant_name: str = "Ava",
     system_name: str = "AvaCore",
     model_name: str = "unknown",
@@ -95,7 +95,7 @@ def load_daily_note(brain_dir: Path, day: datetime, max_chars: int = 5000) -> st
 def load_brain_context(
     brain_dir: Path,
     timezone: str = "Europe/Zurich",
-    default_location: str = "Zurich, Switzerland",
+    default_location: str = "Schaffhausen, Switzerland",
     assistant_name: str = "Ava",
     system_name: str = "AvaCore",
     model_name: str = "unknown",

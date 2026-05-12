@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from contextlib import asynccontextmanager
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 import re
 from collections import defaultdict
@@ -76,6 +77,62 @@ def verify_admin_password(x_admin_password: str | None = Header(default=None)) -
         raise HTTPException(status_code=503, detail="Admin password is not configured.")
     if not x_admin_password or x_admin_password != expected:
         raise HTTPException(status_code=401, detail="Invalid admin password.")
+
+
+def answer_runtime_question(text: str) -> str | None:
+    normalized = (text or "").strip().lower()
+
+    date_phrases = [
+        "welches datum ist heute",
+        "welches datum haben wir",
+        "was ist heute für ein datum",
+        "welcher tag ist heute",
+        "heutiges datum",
+    ]
+
+    time_phrases = [
+        "wie spät ist es",
+        "welche uhrzeit",
+        "was ist die uhrzeit",
+    ]
+
+    if any(phrase in normalized for phrase in date_phrases):
+        tz = ZoneInfo(settings.daily_briefing_timezone)
+        now = datetime.now(tz)
+
+        weekday_de = {
+            0: "Montag",
+            1: "Dienstag",
+            2: "Mittwoch",
+            3: "Donnerstag",
+            4: "Freitag",
+            5: "Samstag",
+            6: "Sonntag",
+        }[now.weekday()]
+
+        month_de = {
+            1: "Januar",
+            2: "Februar",
+            3: "März",
+            4: "April",
+            5: "Mai",
+            6: "Juni",
+            7: "Juli",
+            8: "August",
+            9: "September",
+            10: "Oktober",
+            11: "November",
+            12: "Dezember",
+        }[now.month]
+
+        return f"Heute ist {weekday_de}, der {now.day}. {month_de} {now.year}."
+
+    if any(phrase in normalized for phrase in time_phrases):
+        tz = ZoneInfo(settings.daily_briefing_timezone)
+        now = datetime.now(tz)
+        return f"Es ist {now.strftime('%H:%M')} Uhr ({settings.daily_briefing_timezone})."
+
+    return None
 
 
 @asynccontextmanager
