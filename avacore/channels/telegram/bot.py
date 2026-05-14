@@ -1,4 +1,5 @@
 from __future__ import annotations
+from avacore.tools.mystrom import light_on, light_off, light_status
 
 import time
 import requests
@@ -72,9 +73,12 @@ def command_help_text() -> str:
         "/maildigest - Mails kurz zusammenfassen\n"
         "/sendmail <subject> | <text> - Mail an Standardempfänger senden\n"
         "/mailscript <dateiname.py> | <scriptinhalt> - Python-Script mailen\n"
-        "/mailnote <titel> | <inhalt> - wichtigen Inhalt mailen\n"
+        "/mailnote <titel> | <inhalt> - wichtigen Inhalt mailen\n\n"
         "/camera - aktuelles Kamerabild holen\n"
-        "/snapshot - Alias für /camera\n"
+        "/snapshot - Alias für /camera\n\n"
+        "/switchon - Switch einschalten\n"
+        "/switchoff - Switch ausschalteb\n"
+        "/switchstate - Status abfragen\n\n"
         "/briefing - heutiges Kalender-Briefing abrufen\n"
     )
 
@@ -1074,6 +1078,75 @@ async def research_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             f"Recherche-Befehl fehlgeschlagen: {exc}"
         )
 
+async def switch_on_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
+    chat_id = str(update.effective_chat.id)
+
+    if update.effective_chat.type != "private" or not is_allowed_chat(chat_id):
+        await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
+        return
+
+    try:
+        result = light_on()
+        await update.effective_message.reply_text(result)
+    except Exception as exc:
+        await update.effective_message.reply_text(f"Switch konnte nicht eingeschaltet werden: {exc}")
+
+
+async def switch_off_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
+    chat_id = str(update.effective_chat.id)
+
+    if update.effective_chat.type != "private" or not is_allowed_chat(chat_id):
+        await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
+        return
+
+    try:
+        result = light_off()
+        await update.effective_message.reply_text(result)
+    except Exception as exc:
+        await update.effective_message.reply_text(f"Switch konnte nicht ausgeschaltet werden: {exc}")
+
+
+async def switch_state_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
+    chat_id = str(update.effective_chat.id)
+
+    if update.effective_chat.type != "private" or not is_allowed_chat(chat_id):
+        await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
+        return
+
+    try:
+        status = light_status()
+
+        relay = status.get("relay")
+        power = status.get("power")
+        temperature = status.get("temperature")
+
+        relay_text = "ein" if relay else "aus"
+
+        lines = [
+            f"myStrom Switch Status:",
+            f"- Relais: {relay_text}",
+        ]
+
+        if power is not None:
+            lines.append(f"- Leistung: {power} W")
+
+        if temperature is not None:
+            lines.append(f"- Temperatur: {temperature} °C")
+
+        await update.effective_message.reply_text("\n".join(lines))
+
+    except Exception as exc:
+        await update.effective_message.reply_text(f"Switch-Status konnte nicht gelesen werden: {exc}")
+
 
 def build_app() -> Application:
     if not settings.telegram_bot_token:
@@ -1117,6 +1190,10 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("mailnote", mailnote_cmd))
 
     app.add_handler(CommandHandler("briefing", briefing_cmd))
+
+    app.add_handler(CommandHandler("switchon", switch_on_cmd))
+    app.add_handler(CommandHandler("switchoff", switch_off_cmd))
+    app.add_handler(CommandHandler("switchstate", switch_state_cmd))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
 
