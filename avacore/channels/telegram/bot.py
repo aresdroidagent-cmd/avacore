@@ -1,5 +1,8 @@
 from __future__ import annotations
 from avacore.tools.mystrom import light_on, light_off, light_status
+from avacore.tools.speech_to_text import transcribe_audio_file
+from telegram import Update
+from telegram.ext import ContextTypes, MessageHandler, filters
 
 import time
 import requests
@@ -1270,6 +1273,100 @@ async def handle_switch_intent(
 
     return False
 
+async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
+    chat_id = str(update.effective_chat.id)
+
+    if update.effective_chat.type != "private" or not is_allowed_chat(chat_id):
+        await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
+        return
+
+    if not settings.voice_enabled:
+        await update.effective_message.reply_text("Spracherkennung ist deaktiviert.")
+        return
+
+    voice = update.effective_message.voice
+    audio = update.effective_message.audio
+
+    tg_file_id = None
+    suffix = ".ogg"
+
+    if voice:
+        tg_file_id = voice.file_id
+        suffix = ".ogg"
+    elif audio:
+        tg_file_id = audio.file_id
+        suffix = ".oga"
+    else:
+        return
+
+    try:
+        settings.voice_cache_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = int(time.time())
+        audio_path = settings.voice_cache_dir / f"telegram-voice-{chat_id}-{timestamp}{suffix}"
+
+        tg_file = await context.bot.get_file(tg_file_id)
+        await tg_file.download_to_drive(custom_path=str(audio_path))
+
+        await update.effective_message.reply_text("Ich höre kurz zu...")
+
+        result = transcribe_audio_file(
+            audio_path=audio_path,
+            model_name=settings.voice_model,
+            device=settings.voice_device,
+            compute_type=settings.voice_compute_type,
+            language=settings.voice_language,
+        )
+
+        text = (result.get("text") or "").strip()
+
+        if not text:
+            await update.effective_message.reply_text("Ich konnte die Sprachnachricht nicht verständlich transkribieren.")
+            return
+
+        await update.effective_message.reply_text(f"Verstanden:\n{text}")
+
+        response = requests.post(
+            f"{api_base()}/reply",
+            json={
+                "channel": "telegram",
+                "user_id": str(update.effective_user.id) if update.effective_user else "telegram-user",
+                "chat_id": chat_id,
+                "text": text,
+                "timestamp": int(time.time()),
+            },
+            timeout=300,
+        )
+
+        if not response.ok:
+            try:
+                detail = response.json().get("detail", response.text)
+            except Exception:
+                detail = response.text
+            await update.effective_message.reply_text(f"Reply fehlgeschlagen: {detail}")
+            return
+
+        data = response.json()
+        reply_text = (data.get("reply") or data.get("answer") or "").strip()
+
+        if not reply_text:
+            reply_text = "Keine Antwort erhalten."
+
+        if len(reply_text) <= 4000:
+            await update.effective_message.reply_text(reply_text)
+            return
+
+        chunk_size = 3800
+        for i in range(0, len(reply_text), chunk_size):
+            await update.effective_message.reply_text(reply_text[i:i + chunk_size])
+
+    except Exception as exc:
+        await update.effective_message.reply_text(f"Sprachverarbeitung fehlgeschlagen: {exc}")
+
+
 def build_app() -> Application:
     if not settings.telegram_bot_token:
         raise RuntimeError("Missing TELEGRAM_BOT_TOKEN in .env")
@@ -1316,7 +1413,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("switchon", switch_on_cmd))
     app.add_handler(CommandHandler("switchoff", switch_off_cmd))
     app.add_handler(CommandHandler("switchstate", switch_state_cmd))
-
+    
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, voice_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
 
     return app

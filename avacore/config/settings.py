@@ -181,5 +181,15 @@ class Settings:
         self.assistant_name = os.environ.get("AVACORE_ASSISTANT_NAME", "Ava").strip()
         self.system_name = os.environ.get("AVACORE_SYSTEM_NAME", "AvaCore").strip()
         self.auto_research = os.environ.get("AVACORE_AUTO_RESEARCH", "ask").strip().lower()
+        self.voice_enabled = os.environ.get("AVACORE_VOICE_ENABLED", "0").strip() in {
+            "1", "true", "True", "yes", "on"
+        }
+        self.voice_model = os.environ.get("AVACORE_VOICE_MODEL", "base").strip()
+        self.voice_device = os.environ.get("AVACORE_VOICE_DEVICE", "cpu").strip()
+        self.voice_compute_type = os.environ.get("AVACORE_VOICE_COMPUTE_TYPE", "int8").strip()
+        self.voice_cache_dir = Path(
+            os.environ.get("AVACORE_VOICE_CACHE_DIR", "./data/cache/voice")
+        ).expanduser()
+        self.voice_language = os.environ.get("AVACORE_VOICE_LANGUAGE", "de").strip()
 
 settings = Settings()
