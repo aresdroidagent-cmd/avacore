@@ -926,15 +926,17 @@ This allows Roger to talk to Ava through Telegram.
 Dependencies
 
 System dependency:
-
+```bash
 sudo apt install ffmpeg
+```
 
 Python dependency:
 
 ```bash
 pip install faster-whisper
 ```
-Configuration
+### Configuration
+
 AVACORE_VOICE_ENABLED=1
 AVACORE_VOICE_MODEL=base
 AVACORE_VOICE_DEVICE=cpu
@@ -966,7 +968,7 @@ can control the myStrom Switch without sending the command through the LLM first
 
 ```md
 ## myStrom Switch control
-
+```
 AvaCore can control a local myStrom Switch through the LAN API.
 
 ### Configuration
@@ -974,11 +976,13 @@ AvaCore can control a local myStrom Switch through the LAN API.
 ```env
 AVACORE_MYSTROM_IP=192.168.8.186
 AVACORE_MYSTROM_TIMEOUT=2
-Telegram commands
+```
+### Telegram commands
 /switchon
 /switchoff
 /switchstate
-Natural language
+
+### Natural language
 
 Telegram text and voice messages support simple local switch intents:
 
