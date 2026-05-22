@@ -39,6 +39,68 @@ def default_mail_recipient() -> str | None:
     recipient = (settings.mail_allowed_to[0] or "").strip()
     return recipient or None
 
+def detect_switch_intent(text: str) -> str | None:
+    normalized = (text or "").strip().lower()
+
+    switch_words = [
+        "licht",
+        "lampe",
+        "switch",
+        "mystrom",
+        "steckdose",
+    ]
+
+    if not any(word in normalized for word in switch_words):
+        return None
+
+    on_words = [
+        "einschalten",
+        "ein schalten",
+        "mach an",
+        "mache an",
+        "anschalten",
+        "an machen",
+        "licht an",
+        "lampe an",
+        "switch on",
+        "turn on",
+    ]
+
+    off_words = [
+        "ausschalten",
+        "aus schalten",
+        "mach aus",
+        "mache aus",
+        "aus machen",
+        "licht aus",
+        "lampe aus",
+        "switch off",
+        "turn off",
+    ]
+
+    state_words = [
+        "status",
+        "zustand",
+        "ist das licht an",
+        "ist die lampe an",
+        "ist eingeschaltet",
+        "ist ausgeschaltet",
+        "leistung",
+        "verbrauch",
+        "power",
+        "state",
+    ]
+
+    if any(word in normalized for word in on_words):
+        return "on"
+
+    if any(word in normalized for word in off_words):
+        return "off"
+
+    if any(word in normalized for word in state_words):
+        return "state"
+
+    return None
 
 def command_help_text() -> str:
     return (
@@ -899,7 +961,6 @@ async def page_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await update.effective_message.reply_text(answer or "Keine Erklärung erhalten.")
 
-
 async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_chat or not update.effective_message:
         return
@@ -917,6 +978,18 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         print("TELEGRAM RAW TEXT:", repr(update.effective_message.text))
         print("TELEGRAM CHAT ID:", repr(chat_id))
         print("TELEGRAM TO /reply:", repr(text))
+
+    # ------------------------------------------------------------
+    # Local myStrom natural language control
+    # ------------------------------------------------------------
+    # This is handled before the normal /reply call so simple device
+    # commands do not need to go through the LLM.
+    # ------------------------------------------------------------
+    switch_intent = detect_switch_intent(text)
+    if switch_intent:
+        handled = await handle_switch_intent(update, switch_intent)
+        if handled:
+            return
 
     response = requests.post(
         f"{api_base()}/reply",
@@ -939,7 +1012,7 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     data = response.json()
-    reply_text = (data.get("reply") or "").strip()
+    reply_text = (data.get("reply") or data.get("answer") or "").strip()
     if not reply_text:
         reply_text = "Keine Antwort erhalten."
 
@@ -950,6 +1023,7 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chunk_size = 3800
     for i in range(0, len(reply_text), chunk_size):
         await update.effective_message.reply_text(reply_text[i:i + chunk_size])
+
 
 async def camera_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_chat or not update.effective_message:
@@ -1147,6 +1221,54 @@ async def switch_state_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     except Exception as exc:
         await update.effective_message.reply_text(f"Switch-Status konnte nicht gelesen werden: {exc}")
 
+async def handle_switch_intent(
+    update: Update,
+    intent: str,
+) -> bool:
+    if not update.effective_message:
+        return False
+
+    try:
+        if intent == "on":
+            result = light_on()
+            await update.effective_message.reply_text(result)
+            return True
+
+        if intent == "off":
+            result = light_off()
+            await update.effective_message.reply_text(result)
+            return True
+
+        if intent == "state":
+            status = light_status()
+
+            relay = status.get("relay")
+            power = status.get("power")
+            temperature = status.get("temperature")
+
+            relay_text = "ein" if relay else "aus"
+
+            lines = [
+                "myStrom Switch Status:",
+                f"- Relais: {relay_text}",
+            ]
+
+            if power is not None:
+                lines.append(f"- Leistung: {power} W")
+
+            if temperature is not None:
+                lines.append(f"- Temperatur: {temperature} °C")
+
+            await update.effective_message.reply_text("\n".join(lines))
+            return True
+
+    except Exception as exc:
+        await update.effective_message.reply_text(
+            f"myStrom-Aktion fehlgeschlagen: {exc}"
+        )
+        return True
+
+    return False
 
 def build_app() -> Application:
     if not settings.telegram_bot_token:

@@ -575,7 +575,7 @@ Enable in `.env`:
 AVACORE_CAMERA_ENABLED=1
 AVACORE_CAMERA_USER=admin
 AVACORE_CAMERA_PASSWORD=
-AVACORE_CAMERA_IP=192.168.8.184
+AVACORE_CAMERA_IP=192.168.X.XXX
 AVACORE_CAMERA_RTSP_PATH=/play1.sdp
 AVACORE_CAMERA_CACHE_DIR=./data/cache/camera
 ```
@@ -875,3 +875,33 @@ Shared Brain
 ```
 
 This is the basis for Ava becoming a useful long-term project assistant instead of a stateless chatbot.
+
+## myStrom Switch integration
+
+AvaCore can control a local myStrom Switch directly through the LAN API.
+
+This is useful for simple local smart-home actions such as switching a lamp on or off without using a cloud service.
+
+### Configuration
+
+In this case we used an plug from myStrom, because it hase a REST API
+Add the switch IP to `.env`:
+
+```env
+# myStrom Switch / local smart plug
+AVACORE_MYSTROM_IP=192.168.X.XXX
+AVACORE_MYSTROM_TIMEOUT=2
+```
+
+### Telegram commands
+
+The Telegram bot supports direct switch commands:
+
+/switchon
+/switchoff
+/switchstate
+
+### Safety note
+
+The current myStrom integration is intentionally limited to explicit local switch actions.
+More autonomous device control should be routed through the AvaCore decision/tool router and should require confirmation for risky actions.
