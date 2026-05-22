@@ -61,6 +61,14 @@ def detect_switch_intent(text: str) -> str | None:
         "ein schalten",
         "mach an",
         "mache an",
+        "mach das licht an",
+        "mache das licht an",
+        "schalte das licht an",
+        "schalt das licht an",
+        "schalt licht an",
+        "licht einschalten",
+        "licht ein",
+        "lampe ein",
         "anschalten",
         "an machen",
         "licht an",
@@ -74,7 +82,12 @@ def detect_switch_intent(text: str) -> str | None:
         "aus schalten",
         "mach aus",
         "mache aus",
-        "aus machen",
+        "mach das licht aus",
+        "mache das licht aus",
+        "schalte das licht aus",
+        "schalt das licht aus",
+        "schalt licht aus",
+        "licht ausschalten",
         "licht aus",
         "lampe aus",
         "switch off",
@@ -1329,6 +1342,15 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         await update.effective_message.reply_text(f"Verstanden:\n{text}")
 
+        # ------------------------------------------------------------
+        # Reuse local natural-language switch control for voice input
+        # ------------------------------------------------------------
+        switch_intent = detect_switch_intent(text)
+        if switch_intent:
+            handled = await handle_switch_intent(update, switch_intent)
+            if handled:
+                return
+
         response = requests.post(
             f"{api_base()}/reply",
             json={
@@ -1413,7 +1435,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("switchon", switch_on_cmd))
     app.add_handler(CommandHandler("switchoff", switch_off_cmd))
     app.add_handler(CommandHandler("switchstate", switch_state_cmd))
-    
+
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, voice_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
 

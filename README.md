@@ -711,6 +711,9 @@ The timer expects the AvaCore API to be running.
 
 ## Vision endpoints
 
+For SmolVLM2 vision support, the tested setup used Transformers 4.50.0.dev0.
+If the stable package fails with the selected vision model, install the matching development version manually.
+
 Detect image mode:
 
 ```bash
@@ -905,3 +908,84 @@ The Telegram bot supports direct switch commands:
 
 The current myStrom integration is intentionally limited to explicit local switch actions.
 More autonomous device control should be routed through the AvaCore decision/tool router and should require confirmation for risky actions.
+
+## Telegram voice input
+
+AvaCore can process Telegram voice messages.
+
+Flow:
+
+```text
+Telegram voice message
+→ audio file download
+→ local Whisper transcription
+→ transcribed text enters the normal AvaCore reply flow
+```
+This allows Roger to talk to Ava through Telegram.
+
+Dependencies
+
+System dependency:
+
+sudo apt install ffmpeg
+
+Python dependency:
+
+```bash
+pip install faster-whisper
+```
+Configuration
+AVACORE_VOICE_ENABLED=1
+AVACORE_VOICE_MODEL=base
+AVACORE_VOICE_DEVICE=cpu
+AVACORE_VOICE_COMPUTE_TYPE=int8
+AVACORE_VOICE_CACHE_DIR=./data/cache/voice
+AVACORE_VOICE_LANGUAGE=de
+
+For first tests, CPU mode is recommended:
+
+AVACORE_VOICE_DEVICE=cpu
+AVACORE_VOICE_COMPUTE_TYPE=int8
+
+Later, CUDA can be tested:
+
+AVACORE_VOICE_DEVICE=cuda
+AVACORE_VOICE_COMPUTE_TYPE=float16
+
+Voice messages are also routed through the local Telegram intent layer.
+This means spoken commands such as:
+
+Mach das Licht an
+Schalte die Lampe aus
+Ist das Licht an?
+
+can control the myStrom Switch without sending the command through the LLM first.
+
+
+### myStrom Switch
+
+```md
+## myStrom Switch control
+
+AvaCore can control a local myStrom Switch through the LAN API.
+
+### Configuration
+
+```env
+AVACORE_MYSTROM_IP=192.168.8.186
+AVACORE_MYSTROM_TIMEOUT=2
+Telegram commands
+/switchon
+/switchoff
+/switchstate
+Natural language
+
+Telegram text and voice messages support simple local switch intents:
+
+Mach das Licht an
+Schalte die Lampe aus
+Ist das Licht an?
+Wie ist der Status der Steckdose?
+
+These commands are handled locally by the Telegram bot before the normal /reply flow.
+This keeps device control deterministic and avoids letting the LLM freely decide whether a device should be switched.

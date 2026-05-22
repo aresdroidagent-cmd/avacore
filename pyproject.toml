@@ -9,27 +9,57 @@ description = "Local personal assistant core for Ava"
 requires-python = ">=3.10"
 dependencies = [
   "fastapi>=0.115",
-  "uvicorn>=0.30",
-  "pydantic>=2.8",
-  "python-dotenv>=1.0",
-  "requests>=2.32",
-  "aiosqlite>=0.20",
-  "python-telegram-bot>=21.0",
-  "pymupdf>=1.24",
-  "sentence-transformers>=3.0",
+  # API / server
+  "fastapi>=0.135",
+  "uvicorn[standard]>=0.42",
+  "pydantic>=2.12",
+  "python-dotenv>=1.2",
+  "requests>=2.33",
+  "httpx>=0.28",
+  "psutil>=7.2",
+
+  # Telegram
+  "python-telegram-bot>=22.7",
+
+  # Data / storage / config
+  "aiosqlite>=0.22",
+  "PyYAML>=6.0",
+
+  # RAG / documents
   "numpy>=1.26,<2",
-  "faiss-cpu>=1.8",
+  "faiss-cpu>=1.13",
+  "PyMuPDF>=1.27",
+  "sentence-transformers>=5.3",
+  "scikit-learn>=1.7",
+
+  # Vision / image handling
+  "pillow>=12.2",
+  "opencv-python-headless==4.10.0.84",
+
+  # Local models / HF
+  "torch>=2.11",
+  "transformers>=4.50",
+  "accelerate>=1.13",
+  "safetensors>=0.7",
+
+  # Web / research / feeds
+  "beautifulsoup4>=4.14",
   "feedparser>=6.0",
-  "transformers>=4.50.0.dev0,<4.58",
-  "torch>=2.2",
-  "accelerate>=1.0",
-  "pillow>=10.0",
-  "num2words>=0.5.14",
-  "icalendar",
-  "recurring-ical-events",
-  "python-dateutil",
-  "playwright",
-  "beautifulsoup4"
+  "playwright>=1.59",
+
+  # Calendar / briefing
+  "icalendar>=7.1",
+  "recurring-ical-events>=3.8",
+  "python-dateutil>=2.9",
+  "tzdata>=2026.2",
+
+  # Voice / speech-to-text
+  "faster-whisper>=1.2",
+  "av>=17.0",
+
+  # CLI / formatting
+  "typer>=0.24",
+  "rich>=14.3",
 ]
 
 [project.optional-dependencies]
