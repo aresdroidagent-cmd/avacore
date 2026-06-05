@@ -1,6 +1,7 @@
 from __future__ import annotations
 from avacore.tools.mystrom import light_on, light_off, light_status
 from avacore.tools.speech_to_text import transcribe_audio_file
+from avacore.tools.camera_rtsp import crop_camera_overlay
 from telegram import Update
 from telegram.ext import ContextTypes, MessageHandler, filters
 
@@ -431,6 +432,89 @@ def weather_code_label(code: int | None) -> str:
         95: "Gewitter",
     }
     return mapping.get(code, f"Wettercode {code}")
+
+
+def clean_camera_description(description: str) -> str:
+    text = (description or "").strip()
+
+    if not text:
+        return "Die Szene ist nicht zuverlässig erkennbar."
+
+    bad_fragments = [
+        "du möchtest",
+        "schriftfreiheit",
+        "leben-konto",
+        "lebenkonto",
+        "spiel mit",
+        "karte von",
+        "zeitbewertung",
+        "schritte verwendet",
+        "there is a text",
+        "the image is a screenshot",
+    ]
+
+    lowered = text.lower()
+
+    if any(fragment in lowered for fragment in bad_fragments):
+        return "Die Szene ist nicht zuverlässig erkennbar. Das Kamerabild wurde aufgenommen, aber die automatische Bildbeschreibung ist unsicher."
+
+    # Very short OCR-only response, e.g. only timestamp/camera model.
+    if "dcs-5222l" in lowered and len(text) < 80:
+        return "Die reale Szene ist nicht zuverlässig erkennbar; das Modell hat hauptsächlich das Kamera-Overlay erkannt."
+
+    return text
+
+
+def translate_camera_description_to_german(description: str) -> str:
+    text = (description or "").strip()
+
+    if not text:
+        return ""
+
+    # Wenn es schon deutsch wirkt, nicht unnötig übersetzen.
+    german_markers = [
+        "ich sehe",
+        "eine person",
+        "ein sofa",
+        "eine tür",
+        "wohnzimmer",
+        "raum",
+        "sichtbar",
+        "nicht zuverlässig erkennbar",
+    ]
+
+    if any(marker in text.lower() for marker in german_markers):
+        return text
+
+    try:
+        response = requests.post(
+            f"{api_base()}/reply",
+            json={
+                "channel": "internal",
+                "user_id": "system",
+                "chat_id": "camera-translation",
+                "text": (
+                    "Übersetze die folgende Kamerabeschreibung ins Deutsche. "
+                    "Formuliere sie kurz, sachlich und natürlich. "
+                    "Erfinde keine zusätzlichen Details. "
+                    "Wenn die Beschreibung unsicher klingt, behalte diese Unsicherheit bei.\n\n"
+                    f"Beschreibung:\n{text}"
+                ),
+                "timestamp": int(time.time()),
+            },
+            timeout=120,
+        )
+
+        if not response.ok:
+            return text
+
+        data = response.json()
+        translated = (data.get("reply") or data.get("answer") or "").strip()
+
+        return translated or text
+
+    except Exception:
+        return text
 
 
 async def weather_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1046,29 +1130,33 @@ async def camera_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     chat_id = str(update.effective_chat.id)
+
     if update.effective_chat.type != "private" or not is_allowed_chat(chat_id):
         await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
         return
 
-    await update.effective_message.reply_text("Ich hole ein aktuelles Kamerabild...")
+    await update.effective_message.reply_text("Ich hole ein aktuelles Kamerabild und schaue es mir an...")
 
     try:
-        response = requests.post(
+        snapshot_response = requests.post(
             f"{api_base()}/camera/snapshot",
             json={},
-            timeout=30,
+            timeout=90,
         )
 
-        if not response.ok:
+        if not snapshot_response.ok:
             try:
-                detail = response.json().get("detail", response.text)
+                detail = snapshot_response.json().get("detail", snapshot_response.text)
             except Exception:
-                detail = response.text
-            await update.effective_message.reply_text(f"Kamera-Snapshot fehlgeschlagen: {detail}")
+                detail = snapshot_response.text
+
+            await update.effective_message.reply_text(
+                f"Kamera-Snapshot fehlgeschlagen: {detail}"
+            )
             return
 
-        data = response.json()
-        image_path = Path(data.get("image_path", ""))
+        snapshot_data = snapshot_response.json()
+        image_path = Path(snapshot_data.get("image_path", ""))
 
         if not image_path.exists():
             await update.effective_message.reply_text(
@@ -1076,14 +1164,66 @@ async def camera_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             )
             return
 
+        # Originalbild wird an Telegram gesendet.
+        # Für das VLM verwenden wir ein oben beschnittenes Bild,
+        # damit D-Link-Zeitstempel/Kameraname nicht die Beschreibung dominieren.
+        try:
+            scene_image_path = crop_camera_overlay(image_path)
+        except Exception:
+            scene_image_path = image_path
+
+        description = ""
+
+        try:
+            vision_response = requests.post(
+                f"{api_base()}/vision/describe_image",
+                json={
+                    "image_path": str(scene_image_path),
+                    "mode": "camera",
+                    "ocr_text": "",
+                },
+                timeout=180,
+            )
+
+            if vision_response.ok:
+                vision_data = vision_response.json()
+                description = (
+                    vision_data.get("caption")
+                    or vision_data.get("description")
+                    or vision_data.get("answer")
+                    or vision_data.get("text")
+                    or ""
+                ).strip()
+                description = clean_camera_description(description)
+                description = translate_camera_description_to_german(description)
+            else:
+                try:
+                    detail = vision_response.json().get("detail", vision_response.text)
+                except Exception:
+                    detail = vision_response.text
+                description = f"VLM-Beschreibung fehlgeschlagen: {detail}"
+
+        except Exception as exc:
+            description = f"VLM-Beschreibung fehlgeschlagen: {exc}"
+
+        caption = "Aktuelles Ava-Kamerabild"
+
+        if description:
+            caption += f"\n\nAva sieht:\n{description}"
+
+        if len(caption) > 1000:
+            caption = caption[:1000] + "\n\n[Beschreibung gekürzt]"
+
         with image_path.open("rb") as photo:
             await update.effective_message.reply_photo(
                 photo=photo,
-                caption="Aktuelles Ava-Kamerabild"
+                caption=caption,
             )
 
     except Exception as exc:
-        await update.effective_message.reply_text(f"Kamera-Befehl fehlgeschlagen: {exc}")
+        await update.effective_message.reply_text(
+            f"Kamera-Befehl fehlgeschlagen: {exc}"
+        )
 
 async def research_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_chat or not update.effective_message:

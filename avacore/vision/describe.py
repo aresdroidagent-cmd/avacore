@@ -50,6 +50,18 @@ ARTWORK_PROMPT = (
     "Antworte sachlich und ohne Ausschmückung."
 )
 
+CAMERA_SCENE_PROMPT = (
+    "You are looking at a live indoor camera image. "
+    "Describe only the visible real-world scene. "
+    "Ignore all timestamps, camera names, dates, numbers, labels, on-screen overlays and text in the image. "
+    "Do not describe any text overlay. "
+    "Do not invent a story, a diagram, a game, an account, a document, or a process. "
+    "Focus only on visible objects such as room, sofa, door, furniture, person, light, walls, windows and devices. "
+    "If a person is visible, say only that a person is visible and roughly where they are. "
+    "Do not identify the person. "
+    "If the scene is unclear, say: 'The scene is not clearly recognizable.' "
+    "Answer in one short factual sentence."
+)
 
 def get_vision_client() -> SmolVLMClient:
     global _client, _client_failed, _client_error
@@ -114,6 +126,8 @@ def choose_prompt(
         return "assembly", ASSEMBLY_PROMPT
     if explicit == "artwork":
         return "artwork", ARTWORK_PROMPT
+    if explicit == "camera":
+        return "camera", CAMERA_SCENE_PROMPT
 
     name = image_path.name.lower()
     ocr = _normalize_text(ocr_text)
@@ -240,33 +254,47 @@ def describe_image_with_smolvlm(
 
     client = get_vision_client()
 
+    explicit_mode = (mode or "").strip().lower()
+
     if prompt:
         final_prompt = prompt
     else:
-        _, base_prompt = choose_prompt(
+        selected_mode, base_prompt = choose_prompt(
             image_path=image_path,
-            ocr_text=ocr_text,
+            ocr_text="" if explicit_mode == "camera" else ocr_text,
             explicit_mode=mode,
-            page_text=page_text,
+            page_text="" if explicit_mode == "camera" else page_text,
         )
+
         default_prompt = (settings.vision_prompt or "").strip()
-        effective_prompt = default_prompt if default_prompt else base_prompt
-        final_prompt = build_contextual_prompt(effective_prompt, page_text=page_text)
+
+        # For camera images, do not use a global generic prompt and do not add
+        # OCR/page context. The D-Link timestamp overlay otherwise dominates the
+        # tiny VLM and causes nonsense descriptions.
+        if selected_mode == "camera":
+            final_prompt = base_prompt
+        else:
+            effective_prompt = default_prompt if default_prompt else base_prompt
+            final_prompt = build_contextual_prompt(
+                effective_prompt,
+                page_text=page_text,
+            )
 
     return client.describe_image(
         image_path=image_path,
         prompt=final_prompt,
     )
 
-
 def detect_image_mode(
     image_path: Path,
     ocr_text: str = "",
     page_text: str = "",
+    explicit_mode: str | None = None,
 ) -> str:
     mode, _ = choose_prompt(
         image_path=image_path,
         ocr_text=ocr_text,
+        explicit_mode=explicit_mode,
         page_text=page_text,
     )
     return mode

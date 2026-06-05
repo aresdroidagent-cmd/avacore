@@ -2,7 +2,11 @@
 __pycache__/
 *.pyc
 .env
-data/sqlite/*.db
+data/sqlite/
+*.db
+*.jpg
+*.ogg
+*.oga
 data/logs/*
 data/cache/*
 data/history/*
