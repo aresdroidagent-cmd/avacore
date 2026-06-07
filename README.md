@@ -993,3 +993,44 @@ Wie ist der Status der Steckdose?
 
 These commands are handled locally by the Telegram bot before the normal /reply flow.
 This keeps device control deterministic and avoids letting the LLM freely decide whether a device should be switched.
+
+## Ava Notes
+
+AvaCore includes a local notes system for capturing and managing short notes through Telegram.
+
+Notes are stored locally in the AvaCore SQLite database and can later be synced/exported to a shared Google Doc.
+
+This avoids giving Ava full access to Roger's private Google account. The recommended workflow is:
+
+```text
+Telegram text or voice
+→ Ava Notes local SQLite storage
+→ optional later sync to a shared Google Doc
+```
+### Telegram note commands
+/note <text>                  Create a new note
+/notes                        Show recent open notes
+/notes open                   Show open notes
+/notes done                   Show completed notes
+/notes archived               Show archived notes
+/notes all                    Show all notes
+/notesearch <query>           Search notes
+/noteadd <id> <text>          Append text to an existing note
+/notedone <id>                Mark a note as done
+/notearchive <id>             Archive a note
+
+### Natural language notes
+
+Telegram text messages can also create notes directly:
+
+Notiere: D405 Halterung nochmals prüfen
+Ava, notiere: myStrom Switch funktioniert über Telegram
+Mach eine Notiz: Kamera-Overlay oben für VLM wegschneiden
+
+### Voice notes
+
+Telegram voice messages can also create notes after speech-to-text transcription.
+
+Example spoken command:
+
+Ava, notiere: Morgen die D405 Halterung prüfen
