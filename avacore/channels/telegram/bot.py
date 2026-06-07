@@ -8,6 +8,7 @@ from telegram.ext import ContextTypes, MessageHandler, filters
 import time
 import requests
 import os
+import re
 from pathlib import Path
 from telegram import Update
 from telegram.ext import (
@@ -19,6 +20,15 @@ from telegram.ext import (
 )
 
 from avacore.config.settings import settings
+from avacore.tools.notes import (
+    append_to_note,
+    create_note,
+    format_note,
+    format_note_list,
+    list_notes,
+    search_notes,
+    update_note_status,
+)
 
 
 def api_base() -> str:
@@ -158,8 +168,70 @@ def command_help_text() -> str:
         "/switchon - Switch einschalten\n"
         "/switchoff - Switch ausschalten\n"
         "/switchstate - Status abfragen\n\n"
-        "/briefing - heutiges Kalender-Briefing abrufen\n"
+        "/briefing - heutiges Kalender-Briefing abrufen\n\n"
+        "/note <Text> - neue lokale Notiz erfassen\n"
+        "/notes [open|done|archived|all] - Notizen anzeigen\n"
+        "/notesearch <Suchbegriff> - Notizen durchsuchen\n"
+        "/noteadd <id> <Text> - Notiz ergänzen\n"
+        "/notedone <id> - Notiz als erledigt markieren\n"
+        "/notearchive <id> - Notiz archivieren\n"
+
     )
+
+def detect_note_intent(text: str) -> str | None:
+    original = (text or "").strip()
+    if not original:
+        return None
+
+    normalized = " ".join(original.split())
+    lowered = normalized.lower()
+
+    # Remove common wake word at the beginning.
+    lowered_no_wake = lowered
+    original_no_wake = normalized
+
+    for wake in ["ava,", "ava"]:
+        if lowered_no_wake.startswith(wake + " "):
+            cut = len(wake)
+            original_no_wake = original_no_wake[cut:].strip(" ,:")
+            lowered_no_wake = lowered_no_wake[cut:].strip(" ,:")
+            break
+
+    # Strong explicit patterns.
+    patterns = [
+        r"^(?:bitte\s+)?notiere(?:\s+bitte)?[:\s]+(.+)$",
+        r"^(?:bitte\s+)?notier(?:\s+bitte)?[:\s]+(.+)$",
+        r"^(?:bitte\s+)?mach(?:e)?\s+eine\s+notiz(?:\s+bitte)?[:\s]+(.+)$",
+        r"^(?:bitte\s+)?erstelle\s+eine\s+notiz(?:\s+bitte)?[:\s]+(.+)$",
+        r"^(?:bitte\s+)?merk(?:e)?\s+dir\s+als\s+notiz[:\s]+(.+)$",
+        r"^(?:bitte\s+)?speichere\s+als\s+notiz[:\s]+(.+)$",
+    ]
+
+    for pattern in patterns:
+        match = re.match(pattern, lowered_no_wake, flags=re.IGNORECASE)
+        if match:
+            # Use the same span on original_no_wake where possible.
+            start = match.start(1)
+            note = original_no_wake[start:].strip(" .,:;")
+            return note or None
+
+    # Fallback for common Whisper variants.
+    fallback_phrases = [
+        "notiere",
+        "notier",
+        "notiert",
+        "mach eine notiz",
+        "mache eine notiz",
+        "erstelle eine notiz",
+        "speichere als notiz",
+    ]
+
+    for phrase in fallback_phrases:
+        if lowered_no_wake.startswith(phrase):
+            note = original_no_wake[len(phrase):].strip(" .,:;")
+            return note or None
+
+    return None
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1091,6 +1163,31 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if handled:
             return
 
+    # ------------------------------------------------------------
+    # Local Ava Notes natural language capture
+    # ------------------------------------------------------------
+    # Example:
+    # "Notiere: D405 Halterung prüfen"
+    # "Ava, notiere: myStrom Switch funktioniert"
+    # ------------------------------------------------------------
+    note_text = detect_note_intent(text)
+    if note_text:
+        try:
+            note = create_note(
+                db_path=settings.db_path,
+                content=note_text,
+                source="telegram-natural-language",
+            )
+            await update.effective_message.reply_text(
+                "Notiz gespeichert:\n\n" + format_note(note)
+            )
+            return
+        except Exception as exc:
+            await update.effective_message.reply_text(
+                f"Notiz konnte nicht gespeichert werden: {exc}"
+            )
+            return
+
     response = requests.post(
         f"{api_base()}/reply",
         json={
@@ -1113,6 +1210,7 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     data = response.json()
     reply_text = (data.get("reply") or data.get("answer") or "").strip()
+
     if not reply_text:
         reply_text = "Keine Antwort erhalten."
 
@@ -1123,7 +1221,6 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chunk_size = 3800
     for i in range(0, len(reply_text), chunk_size):
         await update.effective_message.reply_text(reply_text[i:i + chunk_size])
-
 
 async def camera_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_chat or not update.effective_message:
@@ -1477,10 +1574,15 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         text = (result.get("text") or "").strip()
 
         if not text:
-            await update.effective_message.reply_text("Ich konnte die Sprachnachricht nicht verständlich transkribieren.")
+            await update.effective_message.reply_text(
+                "Ich konnte die Sprachnachricht nicht verständlich transkribieren."
+            )
             return
 
         await update.effective_message.reply_text(f"Verstanden:\n{text}")
+        note_text_debug = detect_note_intent(text)
+        if settings.debug:
+            print("VOICE NOTE INTENT:", repr(note_text_debug))
 
         # ------------------------------------------------------------
         # Reuse local natural-language switch control for voice input
@@ -1489,6 +1591,30 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if switch_intent:
             handled = await handle_switch_intent(update, switch_intent)
             if handled:
+                return
+
+        # ------------------------------------------------------------
+        # Reuse local Ava Notes natural-language capture for voice input
+        # ------------------------------------------------------------
+        # Example spoken:
+        # "Ava, notiere: D405 Halterung nochmals prüfen"
+        # ------------------------------------------------------------
+        note_text = detect_note_intent(text)
+        if note_text:
+            try:
+                note = create_note(
+                    db_path=settings.db_path,
+                    content=note_text,
+                    source="telegram-voice",
+                )
+                await update.effective_message.reply_text(
+                    "Notiz gespeichert:\n\n" + format_note(note)
+                )
+                return
+            except Exception as exc:
+                await update.effective_message.reply_text(
+                    f"Notiz konnte nicht gespeichert werden: {exc}"
+                )
                 return
 
         response = requests.post(
@@ -1526,7 +1652,212 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await update.effective_message.reply_text(reply_text[i:i + chunk_size])
 
     except Exception as exc:
-        await update.effective_message.reply_text(f"Sprachverarbeitung fehlgeschlagen: {exc}")
+        await update.effective_message.reply_text(
+            f"Sprachverarbeitung fehlgeschlagen: {exc}"
+        )
+
+async def note_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
+    chat_id = str(update.effective_chat.id)
+
+    if update.effective_chat.type != "private" or not is_allowed_chat(chat_id):
+        await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
+        return
+
+    content = " ".join(context.args).strip()
+
+    if not content:
+        await update.effective_message.reply_text(
+            "Bitte gib eine Notiz an, z.B.:\n"
+            "/note D405 Halterung nochmals prüfen"
+        )
+        return
+
+    try:
+        note = create_note(
+            db_path=settings.db_path,
+            content=content,
+            source="telegram",
+        )
+        await update.effective_message.reply_text(
+            "Notiz gespeichert:\n\n" + format_note(note)
+        )
+    except Exception as exc:
+        await update.effective_message.reply_text(f"Notiz konnte nicht gespeichert werden: {exc}")
+
+
+async def notes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
+    chat_id = str(update.effective_chat.id)
+
+    if update.effective_chat.type != "private" or not is_allowed_chat(chat_id):
+        await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
+        return
+
+    try:
+        status = "open"
+        limit = 10
+
+        if context.args:
+            first = context.args[0].strip().lower()
+            if first in {"open", "done", "archived", "all"}:
+                status = first
+
+        notes = list_notes(
+            db_path=settings.db_path,
+            status=status,
+            limit=limit,
+        )
+
+        await update.effective_message.reply_text(
+            f"Notizen ({status}):\n\n" + format_note_list(notes)
+        )
+
+    except Exception as exc:
+        await update.effective_message.reply_text(f"Notizen konnten nicht geladen werden: {exc}")
+
+
+async def notesearch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
+    chat_id = str(update.effective_chat.id)
+
+    if update.effective_chat.type != "private" or not is_allowed_chat(chat_id):
+        await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
+        return
+
+    query = " ".join(context.args).strip()
+
+    if not query:
+        await update.effective_message.reply_text(
+            "Bitte gib einen Suchbegriff an, z.B.:\n"
+            "/notesearch D405"
+        )
+        return
+
+    try:
+        notes = search_notes(
+            db_path=settings.db_path,
+            query=query,
+            limit=10,
+        )
+
+        await update.effective_message.reply_text(
+            f"Suchergebnis für '{query}':\n\n" + format_note_list(notes)
+        )
+
+    except Exception as exc:
+        await update.effective_message.reply_text(f"Notizensuche fehlgeschlagen: {exc}")
+
+
+async def noteadd_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
+    chat_id = str(update.effective_chat.id)
+
+    if update.effective_chat.type != "private" or not is_allowed_chat(chat_id):
+        await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
+        return
+
+    if len(context.args) < 2:
+        await update.effective_message.reply_text(
+            "Bitte nutze:\n"
+            "/noteadd <id> <Text>\n\n"
+            "Beispiel:\n"
+            "/noteadd 3 Zusätzlich Schrauben M2.5 prüfen"
+        )
+        return
+
+    try:
+        note_id = int(context.args[0])
+        extra = " ".join(context.args[1:]).strip()
+
+        note = append_to_note(
+            db_path=settings.db_path,
+            note_id=note_id,
+            extra_content=extra,
+        )
+
+        await update.effective_message.reply_text(
+            "Notiz ergänzt:\n\n" + format_note(note)
+        )
+
+    except Exception as exc:
+        await update.effective_message.reply_text(f"Notiz konnte nicht ergänzt werden: {exc}")
+
+
+async def notedone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
+    chat_id = str(update.effective_chat.id)
+
+    if update.effective_chat.type != "private" or not is_allowed_chat(chat_id):
+        await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
+        return
+
+    if not context.args:
+        await update.effective_message.reply_text(
+            "Bitte nutze:\n"
+            "/notedone <id>"
+        )
+        return
+
+    try:
+        note_id = int(context.args[0])
+
+        note = update_note_status(
+            db_path=settings.db_path,
+            note_id=note_id,
+            status="done",
+        )
+
+        await update.effective_message.reply_text(
+            "Notiz als erledigt markiert:\n\n" + format_note(note, include_content=False)
+        )
+
+    except Exception as exc:
+        await update.effective_message.reply_text(f"Notiz konnte nicht erledigt werden: {exc}")
+
+
+async def notearchive_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
+    chat_id = str(update.effective_chat.id)
+
+    if update.effective_chat.type != "private" or not is_allowed_chat(chat_id):
+        await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
+        return
+
+    if not context.args:
+        await update.effective_message.reply_text(
+            "Bitte nutze:\n"
+            "/notearchive <id>"
+        )
+        return
+
+    try:
+        note_id = int(context.args[0])
+
+        note = update_note_status(
+            db_path=settings.db_path,
+            note_id=note_id,
+            status="archived",
+        )
+
+        await update.effective_message.reply_text(
+            "Notiz archiviert:\n\n" + format_note(note, include_content=False)
+        )
+
+    except Exception as exc:
+        await update.effective_message.reply_text(f"Notiz konnte nicht archiviert werden: {exc}")
 
 
 def build_app() -> Application:
@@ -1578,6 +1909,13 @@ def build_app() -> Application:
 
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, voice_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
+
+    app.add_handler(CommandHandler("note", note_cmd))
+    app.add_handler(CommandHandler("notes", notes_cmd))
+    app.add_handler(CommandHandler("notesearch", notesearch_cmd))
+    app.add_handler(CommandHandler("noteadd", noteadd_cmd))
+    app.add_handler(CommandHandler("notedone", notedone_cmd))
+    app.add_handler(CommandHandler("notearchive", notearchive_cmd))
 
     return app
 
