@@ -39,3 +39,4 @@ avacore.egg-info/
 torch/
 
 .env
+data/exports/

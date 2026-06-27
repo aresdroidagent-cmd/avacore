@@ -1018,6 +1018,7 @@ Telegram text or voice
 /noteadd <id> <text>          Append text to an existing note
 /notedone <id>                Mark a note as done
 /notearchive <id>             Archive a note
+/notesync                     lacal Ava notes upload to Google Drive shared with Ava
 
 ### Natural language notes
 
@@ -1034,3 +1035,91 @@ Telegram voice messages can also create notes after speech-to-text transcription
 Example spoken command:
 
 Ava, notiere: Morgen die D405 Halterung prüfen
+
+## Ava Notes Google Drive Sync
+
+AvaCore can export local Ava Notes to a Markdown file and sync it to Google Drive using `rclone`.
+
+This avoids Google Cloud, OAuth app setup, API keys and credit-card requirements.
+
+The local SQLite notes remain the source of truth. Google Drive is only used as an export/sync target.
+
+### Sync architecture
+
+```text
+Ava Notes SQLite
+→ Markdown export
+→ local file: data/exports/ava_notes/Ava Notes.md
+→ rclone
+→ shared Google Drive folder: AvaCore
+```
+
+### Google Drive setup
+
+Recommended setup:
+
+Roger's Google Drive
+└── AvaCore
+
+The folder AvaCore is shared with:
+
+email_of_your_bot@gmail.com
+
+Because Google Drive shortcuts are not always handled like real folders by rclone, the preferred setup is to configure an rclone remote directly with the real Google Drive folder ID of the shared AvaCore folder.
+
+Example remote name:
+
+avacorenotes
+
+Example .env configuration:
+
+AVACORE_NOTES_EXPORT_ENABLED=1
+AVACORE_NOTES_EXPORT_PATH=./data/exports/ava_notes/Ava Notes.md
+AVACORE_NOTES_RCLONE_ENABLED=1
+AVACORE_NOTES_RCLONE_REMOTE=avacorenotes:
+
+### Telegram command
+
+/notesync
+
+This command:
+
+1. Reads local Ava Notes from SQLite
+2. Creates/updates the Markdown export file
+3. Uploads the file to the configured Google Drive folder via rclone
+
+Example result:
+
+Notes Export abgeschlossen.
+
+Lokale Datei:
+data/exports/ava_notes/Ava Notes.md
+
+Google Drive Ziel:
+avacorenotes:
+
+Sync: abgeschlossen.
+
+### rclone test
+
+Before using /notesync, test the remote manually:
+
+echo "AvaCore shared folder test" > /tmp/ava-shared-test.txt
+rclone copyto /tmp/ava-shared-test.txt "avacorenotes:Ava shared test.txt" --progress
+rclone lsf avacorenotes:
+rclone deletefile "avacorenotes:Ava shared test.txt"
+
+The test file should appear in the real shared AvaCore folder in Roger's Google Drive.
+
+### Security model
+
+No Google Cloud project
+No credit card
+No Google Docs API
+No full access to Roger's private Google account
+No credentials committed to GitHub
+
+Only the local rclone configuration has access to the shared folder.
+
+
+

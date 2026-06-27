@@ -192,4 +192,23 @@ class Settings:
         ).expanduser()
         self.voice_language = os.environ.get("AVACORE_VOICE_LANGUAGE", "de").strip()
 
+        self.notes_export_enabled = os.environ.get(
+            "AVACORE_NOTES_EXPORT_ENABLED", "0"
+        ).strip() in {"1", "true", "True", "yes", "on"}
+
+        self.notes_export_path = Path(
+            os.environ.get(
+                "AVACORE_NOTES_EXPORT_PATH",
+                "./data/exports/ava_notes/Ava Notes.md",
+            )
+        ).expanduser()
+
+        self.notes_rclone_enabled = os.environ.get(
+            "AVACORE_NOTES_RCLONE_ENABLED", "0"
+        ).strip() in {"1", "true", "True", "yes", "on"}
+
+        self.notes_rclone_remote = os.environ.get(
+            "AVACORE_NOTES_RCLONE_REMOTE", ""
+        ).strip()
+
 settings = Settings()

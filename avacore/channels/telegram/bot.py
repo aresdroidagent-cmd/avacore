@@ -2,6 +2,7 @@ from __future__ import annotations
 from avacore.tools.mystrom import light_on, light_off, light_status
 from avacore.tools.speech_to_text import transcribe_audio_file
 from avacore.tools.camera_rtsp import crop_camera_overlay
+from avacore.tools.notes_export import export_and_sync_notes
 from telegram import Update
 from telegram.ext import ContextTypes, MessageHandler, filters
 
@@ -175,6 +176,7 @@ def command_help_text() -> str:
         "/noteadd <id> <Text> - Notiz ergänzen\n"
         "/notedone <id> - Notiz als erledigt markieren\n"
         "/notearchive <id> - Notiz archivieren\n"
+        "/notesync - lokale Ava Notes als Markdown exportieren und optional zu Google Drive syncen"
 
     )
 
@@ -478,6 +480,53 @@ async def briefing_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception as exc:
         await update.effective_message.reply_text(
             f"Briefing-Befehl fehlgeschlagen: {exc}"
+        )
+
+
+async def notesync_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
+    chat_id = str(update.effective_chat.id)
+
+    if update.effective_chat.type != "private" or not is_allowed_chat(chat_id):
+        await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
+        return
+
+    if not settings.notes_export_enabled:
+        await update.effective_message.reply_text(
+            "Notes Export ist deaktiviert. Setze AVACORE_NOTES_EXPORT_ENABLED=1."
+        )
+        return
+
+    try:
+        result = export_and_sync_notes(
+            db_path=settings.db_path,
+            export_path=settings.notes_export_path,
+            timezone_name=settings.daily_briefing_timezone,
+            rclone_enabled=settings.notes_rclone_enabled,
+            rclone_remote=settings.notes_rclone_remote,
+        )
+
+        message = (
+            "Notes Export abgeschlossen.\n\n"
+            f"Lokale Datei:\n{result['exported_path']}"
+        )
+
+        if result["rclone_enabled"]:
+            message += (
+                "\n\n"
+                f"Google Drive Ziel:\n{result['rclone_remote']}\n\n"
+                "Sync: abgeschlossen."
+            )
+        else:
+            message += "\n\nRclone Sync ist deaktiviert."
+
+        await update.effective_message.reply_text(message)
+
+    except Exception as exc:
+        await update.effective_message.reply_text(
+            f"Notes Sync fehlgeschlagen: {exc}"
         )
 
 
@@ -1916,6 +1965,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("noteadd", noteadd_cmd))
     app.add_handler(CommandHandler("notedone", notedone_cmd))
     app.add_handler(CommandHandler("notearchive", notearchive_cmd))
+    app.add_handler(CommandHandler("notesync", notesync_cmd))
 
     return app
 
