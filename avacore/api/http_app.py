@@ -42,7 +42,11 @@ from avacore.tools.web_research import (
 from avacore.mail.service import MailService
 from avacore.vision.describe import describe_image_with_smolvlm, detect_image_mode
 from avacore.system.ollama_runtime import start_ollama_server
-
+from avacore.core.jspace import (
+    read_jspace_debug,
+    update_jspace_from_assistant_response,
+    update_jspace_from_user_message,
+)
 
 _ollama_process = None
 
@@ -361,6 +365,7 @@ def format_rag_sources(rag_hits: list[dict]) -> str:
 def build_system_prompt(
     memory_scope: str | None = None,
     rag_hits: list[dict] | None = None,
+    jspace_context: str = "",
 ) -> str:
     """
     Build Ava's full system prompt.
@@ -371,7 +376,8 @@ def build_system_prompt(
     3. Active personality profile
     4. Verified long-term memories
     5. RAG excerpts
-    6. Final operating rules
+    6. Dynamic Conscious Workspace / JSpace
+    7. Final operating rules
     """
 
     profile = load_active_personality_profile()
@@ -443,6 +449,9 @@ def build_system_prompt(
 
         if rag_lines:
             parts.append("LOCAL KNOWLEDGE BASE / RAG EXCERPTS:\n" + "\n".join(rag_lines))
+
+    if jspace_context:
+        parts.append(jspace_context)
 
     parts.append(
         "FINAL RESPONSE RULES:\n"
@@ -899,10 +908,30 @@ def get_hybrid_context(payload_text: str, session_id: str) -> tuple[list[dict], 
         raw_rag_hits = retriever.search(payload_text, top_k=settings.rag_top_k)
         rag_hits = select_rag_hits(raw_rag_hits)
 
+    jspace_context = ""
+
+    if getattr(settings, "jspace_enabled", False):
+        try:
+            jspace_context = update_jspace_from_user_message(
+                path=settings.jspace_path,
+                text=payload_text,
+                focus_mode=settings.jspace_focus_mode,
+                top_k=settings.jspace_top_k,
+                decay=settings.jspace_decay,
+                min_activation=settings.jspace_min_activation,
+            )
+        except Exception as exc:
+            if settings.debug:
+                print("JSPACE UPDATE FAILED:", exc)
+
     messages = [
         {
             "role": "system",
-            "content": build_system_prompt(memory_scope="user", rag_hits=rag_hits),
+            "content": build_system_prompt(
+                memory_scope="user",
+                rag_hits=rag_hits,
+                jspace_context=jspace_context,
+            ),
         }
     ]
     messages.extend(history)
@@ -932,6 +961,19 @@ def finalize_reply(
 
     store.add_message(session_id, "user", user_text)
     store.add_message(session_id, "assistant", answer)
+
+    if getattr(settings, "jspace_enabled", False):
+        try:
+            update_jspace_from_assistant_response(
+                path=settings.jspace_path,
+                text=answer,
+                focus_mode=settings.jspace_focus_mode,
+                decay=settings.jspace_decay,
+                min_activation=settings.jspace_min_activation,
+            )
+        except Exception as exc:
+            if settings.debug:
+                print("JSPACE ASSISTANT UPDATE FAILED:", exc)
 
     return ReplyResponse(reply=answer)
 
@@ -1089,6 +1131,32 @@ def personality_restore(payload: PersonalityRestoreRequest) -> dict:
 @app.get("/policies")
 def policies() -> dict:
     return {"rules": [rule.model_dump() for rule in policy_engine.list_rules()]}
+
+
+
+@app.get("/debug/jspace")
+def debug_jspace(_: None = Depends(verify_admin_password)) -> dict:
+    if not getattr(settings, "jspace_enabled", False):
+        return {
+            "ok": True,
+            "enabled": False,
+            "message": "JSpace is disabled",
+        }
+
+    try:
+        state = read_jspace_debug(
+            path=settings.jspace_path,
+            focus_mode=settings.jspace_focus_mode,
+            top_k=max(settings.jspace_top_k, 20),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"jspace debug failed: {exc}") from exc
+
+    return {
+        "ok": True,
+        "enabled": True,
+        "state": state,
+    }
 
 
 # -----------------------------------------------------------------------------

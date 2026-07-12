@@ -1311,5 +1311,68 @@ systemctl --user enable --now avacore-mail-digest.timer
 systemctl --user start avacore-mail-digest.service
 journalctl --user -u avacore-mail-digest.service -n 80 --no-pager
 ```
+## Dynamic Conscious Workspace / JSpace
+
+AvaCore includes a first minimal implementation of the Dynamic Conscious Workspace, called **JSpace**.
+
+JSpace is not a separate memory and not a separate intelligence. It is a dynamic activation field that represents Ava's current cognitive focus across the larger AvaCore context.
+
+The current Phase 1 implementation is intentionally conservative:
+
+- JSON-based state storage
+- no autonomous background process
+- no direct modification of verified long-term memory
+- no permanent identity or goal changes without Roger's review
+- injection of the current top activated JSpace items into the `/reply` 
+
+system prompt
+- debug visibility through `/debug/jspace`
+
+This file is private runtime state and must not be committed.
+
+Configuration:
+
+AVACORE_JSPACE_ENABLED=1
+AVACORE_JSPACE_PATH=./data/state/jspace.json
+AVACORE_JSPACE_TOP_K=8
+AVACORE_JSPACE_DECAY=0.92
+AVACORE_JSPACE_MIN_ACTIVATION=0.05
+AVACORE_JSPACE_FOCUS_MODE=balanced
+
+Available focus modes for Phase 1:
+
+balanced
+narrow
+wide
+watchful
+
+The JSpace is updated during normal /reply calls:
+
+user message
+→ JSpace tick / decay
+→ user signal activation
+→ top active JSpace items
+→ system prompt injection
+→ model response
+→ assistant response activation
+
+Debug endpoint:
+
+curl -s http://127.0.0.1:8787/debug/jspace \\
+  -H "X-Admin-Password: YOUR_ADMIN_PASSWORD" | jq
+
+The architecture document is stored in:
+
+docs/JSPACE.md
+
+Safety boundary:
+
+JSpace may influence focus.
+JSpace may suggest what appears relevant.
+JSpace must not silently rewrite durable identity, goals or verified long-term memory.
+
+Durable memory still follows AvaCore's reviewed memory workflow:
+
+candidate → verified → usable as trusted long-term context
 
 

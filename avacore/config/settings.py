@@ -243,4 +243,29 @@ class Settings:
             os.environ.get("AVACORE_IDENTITY_MIN_ROGER_VOTES", "2")
         )
 
+
+        self.jspace_enabled = os.environ.get(
+            "AVACORE_JSPACE_ENABLED", "0"
+        ).strip() in {"1", "true", "True", "yes", "on"}
+
+        self.jspace_path = Path(
+            os.environ.get("AVACORE_JSPACE_PATH", "./data/state/jspace.json")
+        ).expanduser()
+
+        self.jspace_top_k = int(
+            os.environ.get("AVACORE_JSPACE_TOP_K", "8")
+        )
+
+        self.jspace_decay = float(
+            os.environ.get("AVACORE_JSPACE_DECAY", "0.92")
+        )
+
+        self.jspace_min_activation = float(
+            os.environ.get("AVACORE_JSPACE_MIN_ACTIVATION", "0.05")
+        )
+
+        self.jspace_focus_mode = os.environ.get(
+            "AVACORE_JSPACE_FOCUS_MODE", "balanced"
+        ).strip().lower()
+
 settings = Settings()
