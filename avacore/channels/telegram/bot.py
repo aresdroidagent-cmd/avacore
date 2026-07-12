@@ -1,11 +1,18 @@
 from __future__ import annotations
 from avacore.tools.mystrom import light_on, light_off, light_status
 from avacore.tools.speech_to_text import transcribe_audio_file
-from avacore.tools.camera_rtsp import crop_camera_overlay
 from avacore.tools.notes_export import export_and_sync_notes
-from telegram import Update
-from telegram.ext import ContextTypes, MessageHandler, filters
-
+from avacore.tools.camera_rtsp import (
+    build_rtsp_url,
+    capture_rtsp_snapshot,
+    crop_camera_overlay,
+)
+from avacore.tools.identity_rag import (
+    build_identity_index,
+    copy_capture_to_identity_dataset,
+    format_identity_decision,
+    recognize_face_image,
+)
 import time
 import requests
 import os
@@ -164,8 +171,13 @@ def command_help_text() -> str:
         "/sendmail <subject> | <text> - Mail an Standardempfänger senden\n"
         "/mailscript <dateiname.py> | <scriptinhalt> - Python-Script mailen\n"
         "/mailnote <titel> | <inhalt> - wichtigen Inhalt mailen\n\n"
-        "/camera - aktuelles Kamerabild holen\n"
-        "/snapshot - Alias für /camera\n\n"
+        "/camera - aktuelles Kamerabild holen\n"        
+        "/snapshot - Alias für /camera\n"
+        "/idcapture roger - aktuelles Kamerabild als Roger-Beispiel speichern\n"
+        "/idcapture unknown - aktuelles Kamerabild als Nicht-Roger-Beispiel speichern\n"
+        "/idcapture empty - aktuelles Kamerabild als leere Szene speichern\n"
+        "/idtrain - visuellen Identity-Index bauen\n"
+        "/idcheck - aktuelle Kameraaufnahme gegen Identity-Index prüfen\n\n"
         "/switchon - Switch einschalten\n"
         "/switchoff - Switch ausschalten\n"
         "/switchstate - Status abfragen\n\n"
@@ -234,6 +246,15 @@ def detect_note_intent(text: str) -> str | None:
             return note or None
 
     return None
+
+
+def camera_rtsp_url() -> str:
+    return build_rtsp_url(
+        user=settings.camera_user,
+        password=settings.camera_password,
+        ip=settings.camera_ip,
+        rtsp_path=settings.camera_rtsp_path,
+    )
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1909,6 +1930,174 @@ async def notearchive_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.effective_message.reply_text(f"Notiz konnte nicht archiviert werden: {exc}")
 
 
+async def idcapture_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
+    chat_id = str(update.effective_chat.id)
+
+    if update.effective_chat.type != "private" or not is_allowed_chat(chat_id):
+        await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
+        return
+
+    if not settings.identity_enabled:
+        await update.effective_message.reply_text(
+            "Identity RAG ist deaktiviert. Setze AVACORE_IDENTITY_ENABLED=1."
+        )
+        return
+
+    if not context.args:
+        await update.effective_message.reply_text(
+            "Bitte nutze:\n"
+            "/idcapture roger\n"
+            "/idcapture unknown\n"
+            "/idcapture empty"
+        )
+        return
+
+    label = context.args[0].strip().lower()
+
+    try:
+        await update.effective_message.reply_text(f"Erfasse Identity-Beispiel: {label} ...")
+
+        url = camera_rtsp_url()
+
+        raw_snapshot = capture_rtsp_snapshot(
+            url=url,
+            output_dir=settings.camera_cache_dir,
+            camera_name="identity",
+        )
+
+        try:
+            scene_image = crop_camera_overlay(raw_snapshot)
+        except Exception:
+            scene_image = raw_snapshot
+
+        dataset_path = copy_capture_to_identity_dataset(
+            image_path=scene_image,
+            identity_dir=settings.identity_dir,
+            label=label,
+        )
+
+        await update.effective_message.reply_photo(
+            photo=open(scene_image, "rb"),
+            caption=(
+                "Identity-Beispiel gespeichert.\n\n"
+                f"Label: {label}\n"
+                f"Datei: {dataset_path}\n\n"
+                "Danach später /idtrain ausführen."
+            ),
+        )
+
+    except Exception as exc:
+        await update.effective_message.reply_text(
+            f"Identity Capture fehlgeschlagen: {exc}"
+        )
+
+
+async def idtrain_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
+    chat_id = str(update.effective_chat.id)
+
+    if update.effective_chat.type != "private" or not is_allowed_chat(chat_id):
+        await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
+        return
+
+    if not settings.identity_enabled:
+        await update.effective_message.reply_text(
+            "Identity RAG ist deaktiviert. Setze AVACORE_IDENTITY_ENABLED=1."
+        )
+        return
+
+    try:
+        await update.effective_message.reply_text(
+            "Baue Identity-Index. Beim ersten Lauf kann das Modell geladen werden..."
+        )
+
+        result = build_identity_index(
+            identity_dir=settings.identity_dir,
+            model_name=settings.identity_model,
+            device=settings.identity_device,
+        )
+
+        counts = result["counts"]
+
+        await update.effective_message.reply_text(
+            "Identity-Index erstellt.\n\n"
+            f"Roger Face Embeddings: {counts['roger']}\n"
+            f"Unknown Face Embeddings: {counts['unknown']}\n"
+            f"Übersprungen: {counts['skipped']}\n"
+            f"Total im Index: {counts['total']}\n\n"
+            f"Index:\n{result['index_path']}"
+        )
+
+    except Exception as exc:
+        await update.effective_message.reply_text(
+            f"Identity Training fehlgeschlagen: {exc}"
+        )
+
+
+async def idcheck_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
+    chat_id = str(update.effective_chat.id)
+
+    if update.effective_chat.type != "private" or not is_allowed_chat(chat_id):
+        await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
+        return
+
+    if not settings.identity_enabled:
+        await update.effective_message.reply_text(
+            "Identity RAG ist deaktiviert. Setze AVACORE_IDENTITY_ENABLED=1."
+        )
+        return
+
+    try:
+        await update.effective_message.reply_text("Prüfe aktuelle Kameraaufnahme...")
+
+        url = camera_rtsp_url()
+
+        raw_snapshot = capture_rtsp_snapshot(
+            url=url,
+            output_dir=settings.camera_cache_dir,
+            camera_name="identity-check",
+        )
+
+        try:
+            scene_image = crop_camera_overlay(raw_snapshot)
+        except Exception:
+            scene_image = raw_snapshot
+
+        decision = recognize_face_image(
+            image_path=scene_image,
+            identity_dir=settings.identity_dir,
+            model_name=settings.identity_model,
+            device=settings.identity_device,
+            threshold=settings.identity_threshold,
+            margin_threshold=settings.identity_margin,
+            top_k=settings.identity_top_k,
+            min_roger_votes=settings.identity_min_roger_votes,
+        )
+
+        caption = "Identity Check:\n\n" + format_identity_decision(decision)
+
+        if len(caption) > 1000:
+            caption = caption[:997] + "..."
+
+        await update.effective_message.reply_photo(
+            photo=open(scene_image, "rb"),
+            caption=caption,
+        )
+
+    except Exception as exc:
+        await update.effective_message.reply_text(
+            f"Identity Check fehlgeschlagen: {exc}"
+        )       
+
+
 def build_app() -> Application:
     if not settings.telegram_bot_token:
         raise RuntimeError("Missing TELEGRAM_BOT_TOKEN in .env")
@@ -1944,6 +2133,11 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("camera", camera_cmd))
     app.add_handler(CommandHandler("snapshot", camera_cmd))
 
+    # Identity RAG / visual person recognition PoC
+    app.add_handler(CommandHandler("idcapture", idcapture_cmd))
+    app.add_handler(CommandHandler("idtrain", idtrain_cmd))
+    app.add_handler(CommandHandler("idcheck", idcheck_cmd))
+
     app.add_handler(CommandHandler("mail", mail_cmd))
     app.add_handler(CommandHandler("maildigest", maildigest_cmd))
     app.add_handler(CommandHandler("sendmail", sendmail_cmd))
@@ -1956,9 +2150,6 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("switchoff", switch_off_cmd))
     app.add_handler(CommandHandler("switchstate", switch_state_cmd))
 
-    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, voice_message))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
-
     app.add_handler(CommandHandler("note", note_cmd))
     app.add_handler(CommandHandler("notes", notes_cmd))
     app.add_handler(CommandHandler("notesearch", notesearch_cmd))
@@ -1966,6 +2157,10 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("notedone", notedone_cmd))
     app.add_handler(CommandHandler("notearchive", notearchive_cmd))
     app.add_handler(CommandHandler("notesync", notesync_cmd))
+
+    # Message handlers should stay last.
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, voice_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
 
     return app
 
@@ -1975,7 +2170,7 @@ def build_application() -> Application:
 
 
 def main() -> None:
-    app = build_app()
+    app = build_application()
     app.run_polling()
 
 

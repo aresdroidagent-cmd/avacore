@@ -211,4 +211,36 @@ class Settings:
             "AVACORE_NOTES_RCLONE_REMOTE", ""
         ).strip()
 
+        self.identity_enabled = os.environ.get(
+            "AVACORE_IDENTITY_ENABLED", "0"
+        ).strip() in {"1", "true", "True", "yes", "on"}
+
+        self.identity_dir = Path(
+            os.environ.get("AVACORE_IDENTITY_DIR", "./data/vision_identity")
+        ).expanduser()
+
+        self.identity_model = os.environ.get(
+            "AVACORE_IDENTITY_MODEL", "openai/clip-vit-base-patch32"
+        ).strip()
+
+        self.identity_device = os.environ.get(
+            "AVACORE_IDENTITY_DEVICE", "cpu"
+        ).strip()
+
+        self.identity_threshold = float(
+            os.environ.get("AVACORE_IDENTITY_THRESHOLD", "0.78")
+        )
+
+        self.identity_margin = float(
+            os.environ.get("AVACORE_IDENTITY_MARGIN", "0.06")
+        )
+
+        self.identity_top_k = int(
+            os.environ.get("AVACORE_IDENTITY_TOP_K", "5")
+        )
+
+        self.identity_min_roger_votes = int(
+            os.environ.get("AVACORE_IDENTITY_MIN_ROGER_VOTES", "2")
+        )
+
 settings = Settings()

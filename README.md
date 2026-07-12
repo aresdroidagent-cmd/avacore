@@ -1123,3 +1123,123 @@ Only the local rclone configuration has access to the shared folder.
 
 
 
+## Visual Identity RAG / Local Person Recognition PoC
+
+AvaCore includes an experimental local visual identity workflow for testing whether a known person can be recognized from camera snapshots.
+
+This is not a general-purpose face recognition system and should not be treated as biometric certainty. The system is designed to be conservative:
+
+```text
+If Roger is not recognized with enough confidence:
+→ return unknown
+```
+
+### The first supported identity is:
+
+Roger
+
+### Telegram commands
+
+/idcapture roger     Capture the current camera image as a Roger example
+/idcapture unknown   Capture the current camera image as a non-Roger / unknown example
+/idcapture empty     Capture the current camera image as an empty-room example
+/idtrain             Build the local identity vector index
+/idcheck             Check the current camera image against the local identity 
+
+### Pipeline
+
+Camera snapshot
+→ crop camera overlay
+→ detect largest face
+→ create face crop
+→ create CLIP image embedding
+→ store/search embeddings with FAISS
+→ conservative threshold / margin / vote check
+→ Roger or unknown
+
+
+### Conservative recognition logic
+
+Ava only returns roger when several checks pass:
+
+Top match must be Roger
+Roger similarity must be above threshold
+Enough Roger votes must appear in the top-k neighbors
+Margin to non-Roger examples must be large enough
+
+Otherwise the result is:
+
+unknown
+
+This is intentional. It is safer to return unknown too often than to falsely identify another person as Roger.
+
+### Training data
+
+Recommended first test dataset:
+
+Roger examples:        20–50 images
+Unknown examples:      20–50 images
+Empty-room examples:    5–20 images
+
+Useful Roger variations:
+
+near camera
+farther away
+sitting on the sofa
+standing
+frontal face
+slightly side-facing
+different lighting
+different clothes
+
+### Useful negative examples:
+
+empty room
+synthetic non-Roger faces
+other persons, only with consent
+hard negatives such as posters, screens, shadows or face-like objects
+
+Synthetic faces can be useful for initial unknown/hard-negative testing. Real third-party face examples should only be captured with consent.
+
+### Limitations
+
+The current PoC uses OpenCV face detection plus CLIP image embeddings. It works best when the face is clearly visible. Small, heavily cropped, blurred or partially hidden faces may result in:
+
+unknown
+reason: no face detected
+
+This is expected behavior for the first version.
+
+### Configuration
+
+Example .env settings:
+
+AVACORE_IDENTITY_ENABLED=1
+AVACORE_IDENTITY_DIR=./data/vision_identity
+AVACORE_IDENTITY_MODEL=openai/clip-vit-base-patch32
+AVACORE_IDENTITY_DEVICE=cpu
+AVACORE_IDENTITY_THRESHOLD=0.90
+AVACORE_IDENTITY_MARGIN=0.08
+AVACORE_IDENTITY_TOP_K=5
+AVACORE_IDENTITY_MIN_ROGER_VOTES=3
+
+For more conservative behavior:
+
+AVACORE_IDENTITY_THRESHOLD=0.93
+AVACORE_IDENTITY_MARGIN=0.10
+AVACORE_IDENTITY_MIN_ROGER_VOTES=4
+
+For more permissive testing:
+
+AVACORE_IDENTITY_THRESHOLD=0.85
+AVACORE_IDENTITY_MARGIN=0.05
+AVACORE_IDENTITY_MIN_ROGER_VOTES=2
+
+### Privacy
+
+Identity images, face crops and indexes are local runtime data and must not be committed to GitHub.
+
+The identity dataset is ignored by Git:
+
+data/vision_identity/
+
