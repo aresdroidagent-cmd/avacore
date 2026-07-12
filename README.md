@@ -1243,3 +1243,73 @@ The identity dataset is ignored by Git:
 
 data/vision_identity/
 
+## Daily Mail Digest
+
+AvaCore can send a daily Telegram summary of recent emails.
+
+The scheduler script follows the same pattern as the daily calendar briefing:
+
+```text
+systemd user timer
+→ scripts/send_daily_mail_digest.py
+→ AvaCore API: GET /mail/digest
+→ Telegram message to TELEGRAM_ALLOWED_CHAT_ID
+```
+The script does not read Gmail directly. Mail access is handled by the AvaCore API and the existing mail service configuration.
+
+### Configuration
+
+AVACORE_API_URL=http://127.0.0.1:8787
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_ALLOWED_CHAT_ID=
+
+AVACORE_MAIL_DIGEST_LIMIT=8
+
+The mail account itself is configured through the existing AvaCore mail settings:
+
+AVACORE_MAIL_IMAP_HOST=imap.gmail.com
+AVACORE_MAIL_IMAP_PORT=993
+AVACORE_MAIL_USERNAME=
+AVACORE_MAIL_PASSWORD=
+
+### Manual test
+
+Start the AvaCore API first:
+```bash
+python scripts/run_api.py
+```
+Then run:
+```bash
+python scripts/send_daily_mail_digest.py
+```
+
+### systemd user timer
+
+The mail digest can be scheduled at 18:00 with:
+```bash
+nano ~/.config/systemd/user/avacore-mail-digest.service
+```
+
+[Unit]
+Description=Run AvaCore daily mail digest at 18:00
+
+[Timer]
+OnCalendar=*-*-* 18:00:00
+Persistent=true
+Unit=avacore-mail-digest.service
+
+[Install]
+WantedBy=timers.target
+
+### activate
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now avacore-mail-digest.timer
+```
+### Test
+```bash
+systemctl --user start avacore-mail-digest.service
+journalctl --user -u avacore-mail-digest.service -n 80 --no-pager
+```
+
+
