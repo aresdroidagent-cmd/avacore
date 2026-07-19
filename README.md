@@ -1327,7 +1327,7 @@ TimeoutStartSec=5min
 ```
 Timer file:
 
-# ~/.config/systemd/user/avacore-mail-digest.timer
+~/.config/systemd/user/avacore-mail-digest.timer
 
 [Unit]
 Description=Run AvaCore daily mail digest at 18:00 Europe/Zurich
