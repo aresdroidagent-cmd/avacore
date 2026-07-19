@@ -1304,13 +1304,64 @@ WantedBy=timers.target
 ### activate
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable --now avacore-mail-digest.timer
+### systemd user service and timer
+
+The daily mail digest requires both the AvaCore API service and the
+mail-digest timer.
+
+Service file:
+
+```ini
+# ~/.config/systemd/user/avacore-mail-digest.service
+
+[Unit]
+Description=AvaCore daily mail digest
+Wants=avacore-api.service
+After=avacore-api.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ares/avacore
+ExecStart=/home/ares/avacore/.venv/bin/python -u /home/ares/avacore/scripts/send_daily_mail_digest.py
+TimeoutStartSec=5min
 ```
-### Test
+Timer file:
+
+# ~/.config/systemd/user/avacore-mail-digest.timer
+
+[Unit]
+Description=Run AvaCore daily mail digest at 18:00 Europe/Zurich
+
+[Timer]
+OnCalendar=*-*-* 18:00:00 Europe/Zurich
+Persistent=true
+AccuracySec=1min
+Unit=avacore-mail-digest.service
+
+[Install]
+WantedBy=timers.target
+
+Enable the API and timer:
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now avacore-api.service
+systemctl --user enable --now avacore-mail-digest.timer
+systemctl --user restart avacore-mail-digest.timer
+```
+For execution without an active login session:
+```ash
+sudo loginctl enable-linger ares
+```
+Manual systemd test:
 ```bash
 systemctl --user start avacore-mail-digest.service
-journalctl --user -u avacore-mail-digest.service -n 80 --no-pager
+journalctl --user -u avacore-mail-digest.service -n 100 --no-pager
 ```
+Check the next run:
+```bash
+systemctl --user list-timers --all | grep avacore-mail-digest
+```
+
 ## Dynamic Conscious Workspace / JSpace
 
 AvaCore includes a first minimal implementation of the Dynamic Conscious Workspace, called **JSpace**.
