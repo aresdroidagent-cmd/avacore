@@ -487,6 +487,8 @@ Common commands:
 ```text
 /start                         show command overview
 /help                          show available commands
+/de                            switch replies to German
+/en                            switch replies to English
 /health                        runtime status
 /model                         active model and profile
 /reset                         reset Telegram chat history
@@ -504,7 +506,14 @@ Common commands:
 /sendmail <subject> | <body>   send mail to configured default recipient
 ```
 
-Free text messages are forwarded to `/reply` and can use chat history, verified memories, RAG context, policies, personality and the active Ollama model.
+The Telegram language selection is stored per chat for the current bot runtime
+and applies to text messages, transcribed voice messages and camera output. After
+a bot restart, Telegram defaults to German again. The camera description output
+may be translated, but the internal camera VLM prompt always remains English.
+
+Free text messages are forwarded to `/reply` with the selected language and can
+use chat history, verified memories, RAG context, policies, personality and the
+active Ollama model.
 
 ## Web research
 
@@ -1470,4 +1479,3 @@ JSpace must not silently rewrite durable identity, goals or verified long-term m
 Durable memory still follows AvaCore's reviewed memory workflow:
 
 candidate → verified → usable as trusted long-term context
-

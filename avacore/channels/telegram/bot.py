@@ -55,6 +55,11 @@ def is_allowed_chat(chat_id: str) -> bool:
     return bool(allowed) and chat_id == allowed
 
 
+def telegram_reply_language(context: ContextTypes.DEFAULT_TYPE) -> str:
+    language = context.chat_data.get("reply_language", "de")
+    return "en" if language == "en" else "de"
+
+
 def default_mail_recipient() -> str | None:
     if not settings.mail_allowed_to:
         return None
@@ -145,7 +150,8 @@ def command_help_text() -> str:
         "/help - diese Übersicht\n"
         "/health - AvaCore Status\n"
         "/model - aktives Modell\n"
-        "DE/EN Switch - Antwortsprache im Webchat umstellen\n"
+        "/de - Antworten auf Deutsch\n"
+        "/en - replies in English\n"
         "/personality - aktive Persönlichkeit\n"
         "/personalitybackup - Personality in SQLite sichern\n"
         "/personalityrestore <profile_id> - Personality wiederherstellen\n\n"
@@ -280,6 +286,32 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await update.effective_message.reply_text(command_help_text())
+
+
+async def de_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
+    chat_id = str(update.effective_chat.id)
+    if update.effective_chat.type != "private" or not is_allowed_chat(chat_id):
+        await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
+        return
+
+    context.chat_data["reply_language"] = "de"
+    await update.effective_message.reply_text("Antwortsprache: Deutsch.")
+
+
+async def en_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
+    chat_id = str(update.effective_chat.id)
+    if update.effective_chat.type != "private" or not is_allowed_chat(chat_id):
+        await update.effective_message.reply_text("This chat is not authorized.")
+        return
+
+    context.chat_data["reply_language"] = "en"
+    await update.effective_message.reply_text("Reply language: English.")
 
 
 async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1281,6 +1313,7 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "chat_id": chat_id,
             "text": text,
             "timestamp": int(time.time()),
+            "language": telegram_reply_language(context),
         },
         timeout=300,
     )
@@ -1317,7 +1350,15 @@ async def camera_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
         return
 
-    await update.effective_message.reply_text("Ich hole ein aktuelles Kamerabild und schaue es mir an...")
+    language = telegram_reply_language(context)
+    if language == "en":
+        await update.effective_message.reply_text(
+            "I am fetching the current camera image and taking a look..."
+        )
+    else:
+        await update.effective_message.reply_text(
+            "Ich hole ein aktuelles Kamerabild und schaue es mir an..."
+        )
 
     try:
         snapshot_response = await http_client.post(
@@ -1377,7 +1418,8 @@ async def camera_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                     or ""
                 ).strip()
                 description = clean_camera_description(description)
-                description = await translate_camera_description_to_german(description)
+                if language == "de":
+                    description = await translate_camera_description_to_german(description)
             else:
                 try:
                     detail = vision_response.json().get("detail", vision_response.text)
@@ -1388,10 +1430,15 @@ async def camera_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         except Exception as exc:
             description = f"VLM-Beschreibung fehlgeschlagen: {exc}"
 
-        caption = "Aktuelles Ava-Kamerabild"
+        caption = (
+            "Current Ava camera image"
+            if language == "en"
+            else "Aktuelles Ava-Kamerabild"
+        )
 
         if description:
-            caption += f"\n\nAva sieht:\n{description}"
+            label = "Ava sees" if language == "en" else "Ava sieht"
+            caption += f"\n\n{label}:\n{description}"
 
         if len(caption) > 1000:
             caption = caption[:1000] + "\n\n[Beschreibung gekürzt]"
@@ -1707,10 +1754,11 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             json={
                 "channel": "telegram",
                 "user_id": str(update.effective_user.id) if update.effective_user else "telegram-user",
-                "chat_id": chat_id,
-                "text": text,
-                "timestamp": int(time.time()),
-            },
+            "chat_id": chat_id,
+            "text": text,
+            "timestamp": int(time.time()),
+            "language": telegram_reply_language(context),
+        },
             timeout=300,
         )
 
@@ -2121,6 +2169,8 @@ def build_app() -> Application:
 
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("de", de_cmd))
+    app.add_handler(CommandHandler("en", en_cmd))
     app.add_handler(CommandHandler("health", health_cmd))
     app.add_handler(CommandHandler("model", model_cmd))
     app.add_handler(CommandHandler("personality", personality_cmd))
