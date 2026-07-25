@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime
+import os
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
-from PIL import Image
 
 import cv2
-import os
+from PIL import Image
 
 
 def build_rtsp_url(
@@ -31,9 +32,6 @@ def capture_rtsp_snapshot(
     output_dir: Path,
     camera_name: str = "camera",
 ) -> Path:
-    import os
-    import time
-
     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -60,11 +58,13 @@ def capture_rtsp_snapshot(
                 time.sleep(0.1)
 
             if frame is None:
-                last_error = RuntimeError(f"no frame received from camera stream, attempt {attempt}")
+                last_error = RuntimeError(
+                    f"no frame received from camera stream, attempt {attempt}"
+                )
                 time.sleep(1.0)
                 continue
 
-            timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
             out_path = output_dir / f"{camera_name}-{timestamp}.jpg"
 
             ok = cv2.imwrite(str(out_path), frame)

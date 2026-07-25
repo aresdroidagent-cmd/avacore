@@ -36,9 +36,12 @@ torch
 
 # Packaging / local artifacts
 avacore.egg-info/
+*.bak
 torch/
 
 .env
 data/exports/
 data/vision_identity/
 data/state/
+data/brain/daily/*
+!data/brain/daily/.gitkeep

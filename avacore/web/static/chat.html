@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="de">
 <head>
   <meta charset="utf-8" />
   <title>AvaCore Chat</title>
@@ -39,10 +39,15 @@
           <input id="channel" value="web" />
           <input id="userId" value="web-user" />
           <input id="chatId" value="web-chat" />
+          <label for="language">Sprache</label>
+          <select id="language">
+            <option value="de" selected>Deutsch</option>
+            <option value="en">English</option>
+          </select>
         </div>
         <div id="chatLog" class="chat-log"></div>
         <div class="row">
-          <textarea id="prompt" rows="4" placeholder="Ask Ava..."></textarea>
+          <textarea id="prompt" rows="4" placeholder="Frag Ava..."></textarea>
         </div>
         <div class="row">
           <button id="sendBtn">Send</button>

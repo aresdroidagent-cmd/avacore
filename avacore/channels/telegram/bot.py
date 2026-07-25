@@ -14,7 +14,6 @@ from avacore.tools.identity_rag import (
     recognize_face_image,
 )
 import time
-import requests
 import os
 import re
 from pathlib import Path
@@ -28,6 +27,7 @@ from telegram.ext import (
 )
 
 from avacore.config.settings import settings
+from avacore.channels.telegram import http_client
 from avacore.tools.notes import (
     append_to_note,
     create_note,
@@ -145,6 +145,7 @@ def command_help_text() -> str:
         "/help - diese Übersicht\n"
         "/health - AvaCore Status\n"
         "/model - aktives Modell\n"
+        "DE/EN Switch - Antwortsprache im Webchat umstellen\n"
         "/personality - aktive Persönlichkeit\n"
         "/personalitybackup - Personality in SQLite sichern\n"
         "/personalityrestore <profile_id> - Personality wiederherstellen\n\n"
@@ -285,7 +286,7 @@ async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not update.effective_message:
         return
 
-    response = requests.get(f"{api_base()}/health", timeout=15)
+    response = await http_client.get(f"{api_base()}/health", timeout=15)
     if not response.ok:
         await update.effective_message.reply_text(f"Health fehlgeschlagen: {response.text}")
         return
@@ -305,7 +306,7 @@ async def model_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_message:
         return
 
-    response = requests.get(f"{api_base()}/model", timeout=15)
+    response = await http_client.get(f"{api_base()}/model", timeout=15)
     if not response.ok:
         await update.effective_message.reply_text(f"Model-Abfrage fehlgeschlagen: {response.text}")
         return
@@ -320,7 +321,7 @@ async def personality_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not update.effective_message:
         return
 
-    response = requests.get(f"{api_base()}/personality", timeout=30)
+    response = await http_client.get(f"{api_base()}/personality", timeout=30)
     if not response.ok:
         await update.effective_message.reply_text(f"Personality-Abfrage fehlgeschlagen: {response.text}")
         return
@@ -336,7 +337,7 @@ async def personalitybackup_cmd(update: Update, context: ContextTypes.DEFAULT_TY
     if not update.effective_message:
         return
 
-    response = requests.post(
+    response = await http_client.post(
         f"{api_base()}/personality/backup",
         json={},
         timeout=30,
@@ -360,7 +361,7 @@ async def personalityrestore_cmd(update: Update, context: ContextTypes.DEFAULT_T
         await update.effective_message.reply_text("Format: /personalityrestore <profile_id>")
         return
 
-    response = requests.post(
+    response = await http_client.post(
         f"{api_base()}/personality/restore",
         json={"profile_id": profile_id},
         timeout=30,
@@ -379,7 +380,7 @@ async def policies_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not update.effective_message:
         return
 
-    response = requests.get(f"{api_base()}/policies", timeout=30)
+    response = await http_client.get(f"{api_base()}/policies", timeout=30)
     if not response.ok:
         await update.effective_message.reply_text(f"Policies fehlgeschlagen: {response.text}")
         return
@@ -395,7 +396,9 @@ async def memories_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not update.effective_message:
         return
 
-    response = requests.get(f"{api_base()}/memories", params={"limit": 20}, timeout=30)
+    response = await http_client.get(
+        f"{api_base()}/memories", params={"limit": 20}, timeout=30
+    )
     if not response.ok:
         await update.effective_message.reply_text(f"Memories fehlgeschlagen: {response.text}")
         return
@@ -426,7 +429,7 @@ async def remember_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text("Format: /remember <text>")
         return
 
-    response = requests.post(
+    response = await http_client.post(
         f"{api_base()}/memories",
         json={
             "scope": "user",
@@ -450,7 +453,7 @@ async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     payload = {"chat_id": str(update.effective_chat.id)}
-    response = requests.delete(f"{api_base()}/reply", json=payload, timeout=30)
+    response = await http_client.delete(f"{api_base()}/reply", json=payload, timeout=30)
 
     if not response.ok:
         await update.effective_message.reply_text(f"Reset fehlgeschlagen: {response.text}")
@@ -472,7 +475,7 @@ async def briefing_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.effective_message.reply_text("Ich hole dein Kalender-Briefing...")
 
     try:
-        response = requests.post(
+        response = await http_client.post(
             f"{api_base()}/briefing/calendar",
             json={},
             headers=admin_headers(),
@@ -607,7 +610,7 @@ def clean_camera_description(description: str) -> str:
     return text
 
 
-def translate_camera_description_to_german(description: str) -> str:
+async def translate_camera_description_to_german(description: str) -> str:
     text = (description or "").strip()
 
     if not text:
@@ -629,7 +632,7 @@ def translate_camera_description_to_german(description: str) -> str:
         return text
 
     try:
-        response = requests.post(
+        response = await http_client.post(
             f"{api_base()}/reply",
             json={
                 "channel": "internal",
@@ -670,7 +673,7 @@ async def weather_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     location = " ".join(context.args).strip()
 
-    response = requests.post(
+    response = await http_client.post(
         f"{api_base()}/tools/weather",
         json={"location": location or None},
         timeout=30,
@@ -712,7 +715,9 @@ async def medium_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not update.effective_message:
         return
 
-    response = requests.get(f"{api_base()}/tools/medium", params={"limit": 5}, timeout=30)
+    response = await http_client.get(
+        f"{api_base()}/tools/medium", params={"limit": 5}, timeout=30
+    )
     response.raise_for_status()
     items = response.json().get("items", [])
 
@@ -733,7 +738,9 @@ async def news_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_message:
         return
 
-    response = requests.get(f"{api_base()}/tools/news", params={"limit": 5}, timeout=30)
+    response = await http_client.get(
+        f"{api_base()}/tools/news", params={"limit": 5}, timeout=30
+    )
     response.raise_for_status()
     items = response.json().get("items", [])
 
@@ -754,7 +761,9 @@ async def mediumdigest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not update.effective_message:
         return
 
-    response = requests.get(f"{api_base()}/tools/mediumdigest", params={"limit": 5}, timeout=180)
+    response = await http_client.get(
+        f"{api_base()}/tools/mediumdigest", params={"limit": 5}, timeout=180
+    )
     response.raise_for_status()
     data = response.json()
 
@@ -768,7 +777,9 @@ async def newsdigest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not update.effective_message:
         return
 
-    response = requests.get(f"{api_base()}/tools/newsdigest", params={"limit": 5}, timeout=180)
+    response = await http_client.get(
+        f"{api_base()}/tools/newsdigest", params={"limit": 5}, timeout=180
+    )
     response.raise_for_status()
     data = response.json()
 
@@ -792,7 +803,7 @@ async def webfetch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text("Bitte gib eine URL an.")
         return
 
-    response = requests.post(
+    response = await http_client.post(
         f"{api_base()}/tools/web_fetch",
         json={"url": url},
         timeout=30,
@@ -828,7 +839,7 @@ async def webask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     url, question = parts[0], parts[1].strip()
 
-    response = requests.post(
+    response = await http_client.post(
         f"{api_base()}/tools/web_ask",
         json={"url": url, "question": question},
         headers=admin_headers(),
@@ -865,7 +876,7 @@ async def browser_search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.effective_message.reply_text(f"Ich suche im Browser nach:\n{query}")
 
     try:
-        search_response = requests.post(
+        search_response = await http_client.post(
             f"{api_base()}/browser/search",
             json={"query": query},
             headers=admin_headers(),
@@ -883,7 +894,7 @@ async def browser_search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             return
 
-        text_response = requests.post(
+        text_response = await http_client.post(
             f"{api_base()}/browser/text",
             json={"max_chars": 3000},
             headers=admin_headers(),
@@ -934,7 +945,9 @@ async def mail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
         return
 
-    response = requests.get(f"{api_base()}/mail/inbox", params={"limit": 5}, timeout=60)
+    response = await http_client.get(
+        f"{api_base()}/mail/inbox", params={"limit": 5}, timeout=60
+    )
     if not response.ok:
         try:
             detail = response.json().get("detail", response.text)
@@ -966,7 +979,9 @@ async def maildigest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.effective_message.reply_text("Dieser Chat ist nicht freigegeben.")
         return
 
-    response = requests.get(f"{api_base()}/mail/digest", params={"limit": 8}, timeout=180)
+    response = await http_client.get(
+        f"{api_base()}/mail/digest", params={"limit": 8}, timeout=180
+    )
     if not response.ok:
         try:
             detail = response.json().get("detail", response.text)
@@ -1005,7 +1020,7 @@ async def sendmail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     subject, body = [part.strip() for part in raw.split("|", 1)]
 
-    response = requests.post(
+    response = await http_client.post(
         f"{api_base()}/mail/send",
         json={
             "to": recipient,
@@ -1051,7 +1066,7 @@ async def mailscript_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     script_name, script_body = [part.strip() for part in raw.split("|", 1)]
 
-    response = requests.post(
+    response = await http_client.post(
         f"{api_base()}/mail/send_python_script",
         json={
             "to": recipient,
@@ -1095,7 +1110,7 @@ async def mailnote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     title, note = [part.strip() for part in raw.split("|", 1)]
 
-    response = requests.post(
+    response = await http_client.post(
         f"{api_base()}/mail/send_important_note",
         json={
             "to": recipient,
@@ -1127,7 +1142,7 @@ async def docs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     query = " ".join(context.args).strip()
 
-    response = requests.get(
+    response = await http_client.get(
         f"{api_base()}/knowledge/documents",
         params={"q": query, "limit": 20},
         timeout=30,
@@ -1181,7 +1196,7 @@ async def page_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("Seite muss eine Zahl sein.")
         return
 
-    response = requests.post(
+    response = await http_client.post(
         f"{api_base()}/knowledge/explain_page",
         json={"document": document, "page": page},
         timeout=180,
@@ -1258,7 +1273,7 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
             return
 
-    response = requests.post(
+    response = await http_client.post(
         f"{api_base()}/reply",
         json={
             "channel": "telegram",
@@ -1305,7 +1320,7 @@ async def camera_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.effective_message.reply_text("Ich hole ein aktuelles Kamerabild und schaue es mir an...")
 
     try:
-        snapshot_response = requests.post(
+        snapshot_response = await http_client.post(
             f"{api_base()}/camera/snapshot",
             json={},
             timeout=90,
@@ -1342,7 +1357,7 @@ async def camera_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         description = ""
 
         try:
-            vision_response = requests.post(
+            vision_response = await http_client.post(
                 f"{api_base()}/vision/describe_image",
                 json={
                     "image_path": str(scene_image_path),
@@ -1362,7 +1377,7 @@ async def camera_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                     or ""
                 ).strip()
                 description = clean_camera_description(description)
-                description = translate_camera_description_to_german(description)
+                description = await translate_camera_description_to_german(description)
             else:
                 try:
                     detail = vision_response.json().get("detail", vision_response.text)
@@ -1414,7 +1429,7 @@ async def research_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.effective_message.reply_text(f"Ich recherchiere:\n{query}")
 
     try:
-        response = requests.post(
+        response = await http_client.post(
             f"{api_base()}/research",
             json={
                 "query": query,
@@ -1529,7 +1544,7 @@ async def switch_state_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         relay_text = "ein" if relay else "aus"
 
         lines = [
-            f"myStrom Switch Status:",
+            "myStrom Switch Status:",
             f"- Relais: {relay_text}",
         ]
 
@@ -1687,7 +1702,7 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 )
                 return
 
-        response = requests.post(
+        response = await http_client.post(
             f"{api_base()}/reply",
             json={
                 "channel": "telegram",

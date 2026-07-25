@@ -68,12 +68,14 @@ async function loadDocuments() {
 async function sendChat() {
   const text = document.getElementById("prompt")?.value?.trim();
   if (!text) return;
+  const language = document.getElementById("language")?.value || "de";
   const payload = {
     channel: document.getElementById("channel")?.value || "web",
     user_id: document.getElementById("userId")?.value || "web-user",
     chat_id: document.getElementById("chatId")?.value || "web-chat",
     text,
-    timestamp: Math.floor(Date.now() / 1000)
+    timestamp: Math.floor(Date.now() / 1000),
+    language
   };
   appendChat("user", text);
   document.getElementById("prompt").value = "";
@@ -341,6 +343,14 @@ async function loadReviewData() {
 }
 
 window.addEventListener("DOMContentLoaded", () => {
+  const language = document.getElementById("language");
+  if (language) {
+    language.value = localStorage.getItem("avacore_language") || "de";
+    language.addEventListener("change", () => {
+      localStorage.setItem("avacore_language", language.value);
+    });
+  }
+
   document.getElementById("sendBtn")?.addEventListener("click", sendChat);
   document.getElementById("resetBtn")?.addEventListener("click", resetChat);
   document.getElementById("pageExplainBtn")?.addEventListener("click", explainPage);

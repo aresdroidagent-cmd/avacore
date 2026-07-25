@@ -19,6 +19,7 @@ from avacore.config.personality_loader import (
     load_personality_manager,
 )
 from avacore.core.dto import HealthStatus
+from avacore.core.language import ReplyLanguage, response_language_rule
 from avacore.core.prompts import looks_like_code_request
 from avacore.core.brain import append_daily_note, load_brain_context
 from avacore.core.decision import decide_context
@@ -187,6 +188,7 @@ class ReplyRequest(BaseModel):
     chat_id: str
     text: str
     timestamp: int
+    language: ReplyLanguage = "de"
 
 
 class ReplyResponse(BaseModel):
@@ -366,6 +368,7 @@ def build_system_prompt(
     memory_scope: str | None = None,
     rag_hits: list[dict] | None = None,
     jspace_context: str = "",
+    language: ReplyLanguage = "de",
 ) -> str:
     """
     Build Ava's full system prompt.
@@ -459,7 +462,8 @@ def build_system_prompt(
         "- Lokales Projektwissen und verified Memories haben Vorrang vor allgemeinem Modellwissen.\n"
         "- Wenn aktuelle oder externe Informationen nötig sind und nicht im lokalen Kontext stehen, sage klar, dass Recherche nötig ist.\n"
         "- Erfinde keine Fakten. Wenn etwas nicht sicher aus Kontext, Memory oder Wissensbasis hervorgeht, sage das offen.\n"
-        "- Antworte standardmässig auf Deutsch, technisch brauchbar, direkt und pragmatisch."
+        f"{response_language_rule(language)}\n"
+        "- Antworte technisch brauchbar, direkt und pragmatisch."
     )
 
     return "\n\n".join(part for part in parts if part and part.strip())
@@ -895,7 +899,11 @@ def explain_document_page(document_query: str, page: int) -> tuple[dict | None, 
     return {"document": doc, "page": page, "answer": answer}, None
 
 
-def get_hybrid_context(payload_text: str, session_id: str) -> tuple[list[dict], list[dict], dict]:
+def get_hybrid_context(
+    payload_text: str,
+    session_id: str,
+    language: ReplyLanguage = "de",
+) -> tuple[list[dict], list[dict], dict]:
     history = store.get_recent_messages(
         session_id=session_id,
         max_items=settings.max_history_turns,
@@ -931,6 +939,7 @@ def get_hybrid_context(payload_text: str, session_id: str) -> tuple[list[dict], 
                 memory_scope="user",
                 rag_hits=rag_hits,
                 jspace_context=jspace_context,
+                language=language,
             ),
         }
     ]
@@ -1922,7 +1931,11 @@ def reply(payload: ReplyRequest) -> ReplyResponse:
             user_memory_ids=user_memory_ids,
         )
 
-    messages, rag_hits, _decision_dict = get_hybrid_context(payload.text, session_id=session_id)
+    messages, rag_hits, _decision_dict = get_hybrid_context(
+        payload.text,
+        session_id=session_id,
+        language=payload.language,
+    )
 
     try:
         answer = backend.chat(messages)

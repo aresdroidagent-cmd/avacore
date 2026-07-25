@@ -1,7 +1,106 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-import re
+
+RUNTIME_KEYWORDS = (
+    "welches datum",
+    "was ist heute",
+    "welcher tag",
+    "heutiges datum",
+    "datum heute",
+    "wie spät",
+    "uhrzeit",
+    "welche zeit",
+    "current date",
+    "what date",
+    "what time",
+    "today",
+    "heute",
+)
+
+IDENTITY_KEYWORDS = (
+    "wie heisst du",
+    "wie heißt du",
+    "wie ist dein name",
+    "wer bist du",
+    "wer hat dich erschaffen",
+    "wer ist dein schöpfer",
+    "wer ist dein vater",
+    "wer ist roger",
+    "who are you",
+    "what is your name",
+    "who created you",
+    "who is your creator",
+    "who is your father",
+)
+
+LOCATION_KEYWORDS = (
+    "wo bist du",
+    "wo befindest du dich",
+    "wo läufst du",
+    "wo ist dein standort",
+    "dein standort",
+    "where are you",
+    "your location",
+)
+
+CALENDAR_KEYWORDS = (
+    "kalender",
+    "termin",
+    "termine",
+    "agenda",
+    "briefing",
+    "tagesaufgaben",
+    "heute vor",
+)
+
+CAMERA_KEYWORDS = ("kamera", "webcam", "bild", "snapshot", "sehen", "siehst du")
+
+RESEARCH_KEYWORDS = (
+    "suche im web",
+    "recherchiere",
+    "websuche",
+    "internet",
+    "online",
+    "aktuelle version",
+    "neuste version",
+    "neueste version",
+    "latest",
+    "wo kaufen",
+    "preis",
+    "preise",
+    "lieferbar",
+    "bestellen",
+    "gesetz",
+    "news",
+    "nachrichten",
+    "release",
+    "changelog",
+    "hersteller",
+)
+
+RAG_KEYWORDS = (
+    "dokument",
+    "pdf",
+    "manual",
+    "seite",
+    "wissensbasis",
+    "rag",
+    "avacore",
+    "ar4",
+    "isaac",
+    "opencv",
+    "rtsp",
+    "kamera",
+    "ollama",
+    "telegram",
+    "repo",
+    "readme",
+    "setup",
+    "installation",
+    "welche version verwenden wir",
+    "was haben wir",
+)
 
 
 @dataclass
@@ -19,12 +118,8 @@ class ContextDecision:
         return asdict(self)
 
 
-def _contains_any(text: str, patterns: tuple[str, ...]) -> bool:
-    return any(pattern in text for pattern in patterns)
-
-
-def _matches_any(text: str, patterns: tuple[str, ...]) -> bool:
-    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
+    return any(keyword in text for keyword in keywords)
 
 
 def decide_context(user_text: str) -> ContextDecision:
@@ -35,49 +130,10 @@ def decide_context(user_text: str) -> ContextDecision:
     # These must never trigger web research.
     # Ava knows these from Shared Brain + Runtime Context.
     # ------------------------------------------------------------
-    runtime_keywords = [
-        "welches datum",
-        "was ist heute",
-        "welcher tag",
-        "heutiges datum",
-        "datum heute",
-        "wie spät",
-        "uhrzeit",
-        "welche zeit",
-        "current date",
-        "what date",
-        "what time",
-        "today",
-        "heute",
-    ]
-
-    identity_keywords = [
-        "wie heisst du",
-        "wie heißt du",
-        "wie ist dein name",
-        "wer bist du",
-        "wer hat dich erschaffen",
-        "wer ist dein schöpfer",
-        "wer ist dein vater",
-        "wer ist roger",
-        "who are you",
-        "what is your name",
-        "who created you",
-        "who is your creator",
-        "who is your father",
-    ]
-
-    location_keywords = [
-        "wo bist du",
-        "wo befindest du dich",
-        "wo läufst du",
-        "wo ist dein standort",
-        "dein standort",
-        "where are you",
-        "your location",
-    ]
-
-    if any(keyword in text for keyword in runtime_keywords):
+    # A tool-specific intent wins over a generic time word such as "heute".
+    # Otherwise "Was steht heute im Kalender?" is incorrectly treated as a
+    # request for the current date.
+    if _contains_any(text, RUNTIME_KEYWORDS) and not _contains_any(text, CALENDAR_KEYWORDS):
         return ContextDecision(
             needs_memory=True,
             needs_rag=False,
@@ -86,10 +142,13 @@ def decide_context(user_text: str) -> ContextDecision:
             needs_camera=False,
             save_memory_candidate=False,
             confidence=0.95,
-            reason="question can be answered from runtime context such as current date, time or timezone",
+            reason=(
+                "question can be answered from runtime context such as "
+                "current date, time or timezone"
+            ),
         )
 
-    if any(keyword in text for keyword in identity_keywords):
+    if _contains_any(text, IDENTITY_KEYWORDS):
         return ContextDecision(
             needs_memory=True,
             needs_rag=False,
@@ -101,7 +160,7 @@ def decide_context(user_text: str) -> ContextDecision:
             reason="question can be answered from Ava identity / Shared Brain context",
         )
 
-    if any(keyword in text for keyword in location_keywords):
+    if _contains_any(text, LOCATION_KEYWORDS):
         return ContextDecision(
             needs_memory=True,
             needs_rag=False,
@@ -116,26 +175,7 @@ def decide_context(user_text: str) -> ContextDecision:
     # ------------------------------------------------------------
     # Explicit tool intents
     # ------------------------------------------------------------
-    calendar_keywords = [
-        "kalender",
-        "termin",
-        "termine",
-        "agenda",
-        "briefing",
-        "tagesaufgaben",
-        "heute vor",
-    ]
-
-    camera_keywords = [
-        "kamera",
-        "webcam",
-        "bild",
-        "snapshot",
-        "sehen",
-        "siehst du",
-    ]
-
-    if any(keyword in text for keyword in calendar_keywords):
+    if _contains_any(text, CALENDAR_KEYWORDS):
         return ContextDecision(
             needs_memory=True,
             needs_rag=False,
@@ -147,7 +187,7 @@ def decide_context(user_text: str) -> ContextDecision:
             reason="question likely requires calendar context",
         )
 
-    if any(keyword in text for keyword in camera_keywords):
+    if _contains_any(text, CAMERA_KEYWORDS):
         return ContextDecision(
             needs_memory=True,
             needs_rag=False,
@@ -165,30 +205,7 @@ def decide_context(user_text: str) -> ContextDecision:
     # Important: 'heute' alone is NOT enough. It was already handled
     # above as runtime context.
     # ------------------------------------------------------------
-    research_keywords = [
-        "suche im web",
-        "recherchiere",
-        "websuche",
-        "internet",
-        "online",
-        "aktuelle version",
-        "neuste version",
-        "neueste version",
-        "latest",
-        "wo kaufen",
-        "preis",
-        "preise",
-        "lieferbar",
-        "bestellen",
-        "gesetz",
-        "news",
-        "nachrichten",
-        "release",
-        "changelog",
-        "hersteller",
-    ]
-
-    if any(keyword in text for keyword in research_keywords):
+    if _contains_any(text, RESEARCH_KEYWORDS):
         return ContextDecision(
             needs_memory=True,
             needs_rag=False,
@@ -203,30 +220,7 @@ def decide_context(user_text: str) -> ContextDecision:
     # ------------------------------------------------------------
     # RAG / local project knowledge
     # ------------------------------------------------------------
-    rag_keywords = [
-        "dokument",
-        "pdf",
-        "manual",
-        "seite",
-        "wissensbasis",
-        "rag",
-        "avacore",
-        "ar4",
-        "isaac",
-        "opencv",
-        "rtsp",
-        "kamera",
-        "ollama",
-        "telegram",
-        "repo",
-        "readme",
-        "setup",
-        "installation",
-        "welche version verwenden wir",
-        "was haben wir",
-    ]
-
-    if any(keyword in text for keyword in rag_keywords):
+    if _contains_any(text, RAG_KEYWORDS):
         return ContextDecision(
             needs_memory=True,
             needs_rag=True,

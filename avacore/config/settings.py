@@ -1,6 +1,7 @@
-from pathlib import Path
-from dotenv import load_dotenv
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 from avacore.config.profiles import PROFILES
 
@@ -14,11 +15,21 @@ def split_csv(value: str) -> list[str]:
 class Settings:
     def __init__(self) -> None:
         self.profile_name = os.environ.get("AVACORE_PROFILE", "low_vram")
-        self.profile = PROFILES[self.profile_name]
+        try:
+            self.profile = PROFILES[self.profile_name]
+        except KeyError as exc:
+            available = ", ".join(sorted(PROFILES))
+            raise ValueError(
+                f"Unknown AVACORE_PROFILE {self.profile_name!r}; choose one of: {available}"
+            ) from exc
 
         self.log_level = os.environ.get("AVACORE_LOG_LEVEL", "info")
         self.debug = os.environ.get("AVACORE_DEBUG", "0").strip() in {
-            "1", "true", "True", "yes", "on"
+            "1",
+            "true",
+            "True",
+            "yes",
+            "on",
         }
 
         self.db_path = Path(os.environ.get("AVACORE_DB_PATH", "./data/sqlite/avacore.db"))
@@ -41,11 +52,13 @@ class Settings:
             os.environ.get("OLLAMA_TIMEOUT_MS", str(self.profile["request_timeout_ms"]))
         )
         self.ollama_autostart = os.environ.get("OLLAMA_AUTOSTART", "1").strip() in {
-            "1", "true", "True", "yes", "on"
+            "1",
+            "true",
+            "True",
+            "yes",
+            "on",
         }
-        self.ollama_startup_timeout = float(
-            os.environ.get("OLLAMA_STARTUP_TIMEOUT", "30")
-        )
+        self.ollama_startup_timeout = float(os.environ.get("OLLAMA_STARTUP_TIMEOUT", "30"))
         self.ollama_runtime_log = os.environ.get(
             "OLLAMA_RUNTIME_LOG",
             "./data/logs/ollama_runtime.log",
@@ -77,10 +90,14 @@ class Settings:
             os.environ.get("AVACORE_KNOWLEDGE_PROCESSED_DIR", "./data/knowledge/processed")
         )
         self.knowledge_pdf_images_dir = Path(
-            os.environ.get("AVACORE_KNOWLEDGE_PDF_IMAGES_DIR", "./data/knowledge/processed/pdf_images")
+            os.environ.get(
+                "AVACORE_KNOWLEDGE_PDF_IMAGES_DIR", "./data/knowledge/processed/pdf_images"
+            )
         )
         self.knowledge_image_text_dir = Path(
-            os.environ.get("AVACORE_KNOWLEDGE_IMAGE_TEXT_DIR", "./data/knowledge/processed/image_text")
+            os.environ.get(
+                "AVACORE_KNOWLEDGE_IMAGE_TEXT_DIR", "./data/knowledge/processed/image_text"
+            )
         )
         self.knowledge_index_dir = Path(
             os.environ.get("AVACORE_KNOWLEDGE_INDEX_DIR", "./data/knowledge/index")
@@ -103,7 +120,9 @@ class Settings:
         self.news_feeds = split_csv(os.environ.get("AVACORE_NEWS_FEEDS", ""))
 
         self.ocr_enabled = os.environ.get("AVACORE_OCR_ENABLED", "1").strip() not in {
-            "0", "false", "False"
+            "0",
+            "false",
+            "False",
         }
         self.ocr_min_text_length = int(os.environ.get("AVACORE_OCR_MIN_TEXT_LENGTH", "10"))
 
@@ -117,7 +136,9 @@ class Settings:
         self.mail_allowed_to = split_csv(os.environ.get("AVACORE_MAIL_ALLOWED_TO", ""))
 
         self.vision_enabled = os.environ.get("AVACORE_VISION_ENABLED", "1").strip() not in {
-            "0", "false", "False"
+            "0",
+            "false",
+            "False",
         }
         self.vision_model = os.environ.get(
             "AVACORE_VISION_MODEL",
@@ -128,16 +149,22 @@ class Settings:
             "",
         ).strip()
         self.vision_max_new_tokens = int(os.environ.get("AVACORE_VISION_MAX_NEW_TOKENS", "64"))
-        self.vision_on_pdf_images = os.environ.get("AVACORE_VISION_ON_PDF_IMAGES", "0").strip() not in {
-            "0", "false", "False"
-        }
-        self.vision_on_loose_images = os.environ.get("AVACORE_VISION_ON_LOOSE_IMAGES", "1").strip() not in {
-            "0", "false", "False"
-        }
-        self.vision_min_image_pixels = int(os.environ.get("AVACORE_VISION_MIN_IMAGE_PIXELS", "90000"))
+        self.vision_on_pdf_images = os.environ.get(
+            "AVACORE_VISION_ON_PDF_IMAGES", "0"
+        ).strip() not in {"0", "false", "False"}
+        self.vision_on_loose_images = os.environ.get(
+            "AVACORE_VISION_ON_LOOSE_IMAGES", "1"
+        ).strip() not in {"0", "false", "False"}
+        self.vision_min_image_pixels = int(
+            os.environ.get("AVACORE_VISION_MIN_IMAGE_PIXELS", "90000")
+        )
 
         self.camera_enabled = os.environ.get("AVACORE_CAMERA_ENABLED", "0").strip() in {
-            "1", "true", "True", "yes", "on"
+            "1",
+            "true",
+            "True",
+            "yes",
+            "on",
         }
         self.camera_user = os.environ.get("AVACORE_CAMERA_USER", "admin").strip()
         self.camera_password = os.environ.get("AVACORE_CAMERA_PASSWORD", "")
@@ -147,10 +174,18 @@ class Settings:
             os.environ.get("AVACORE_CAMERA_CACHE_DIR", "./data/cache/camera")
         )
         self.browser_enabled = os.environ.get("AVACORE_BROWSER_ENABLED", "0").strip() in {
-            "1", "true", "True", "yes", "on"
+            "1",
+            "true",
+            "True",
+            "yes",
+            "on",
         }
         self.browser_headless = os.environ.get("AVACORE_BROWSER_HEADLESS", "1").strip() in {
-            "1", "true", "True", "yes", "on"
+            "1",
+            "true",
+            "True",
+            "yes",
+            "on",
         }
         self.browser_user_data_dir = Path(
             os.environ.get("AVACORE_BROWSER_USER_DATA_DIR", "./data/browser/chromium-profile")
@@ -164,13 +199,17 @@ class Settings:
             "https://duckduckgo.com/?q=",
         ).strip()
         self.research_enabled = os.environ.get("AVACORE_RESEARCH_ENABLED", "1").strip() in {
-            "1", "true", "True", "yes", "on"
+            "1",
+            "true",
+            "True",
+            "yes",
+            "on",
         }
         self.research_max_results = int(os.environ.get("AVACORE_RESEARCH_MAX_RESULTS", "4"))
         self.research_save_memory_candidate = os.environ.get(
             "AVACORE_RESEARCH_SAVE_MEMORY_CANDIDATE",
             "1",
-       ).strip() in {"1", "true", "True", "yes", "on"}
+        ).strip() in {"1", "true", "True", "yes", "on"}
         self.calendar_ics_url = os.environ.get("AVACORE_CALENDAR_ICS_URL", "").strip()
         self.daily_briefing_time = os.environ.get("AVACORE_DAILY_BRIEFING_TIME", "08:30").strip()
         self.daily_briefing_timezone = os.environ.get(
@@ -182,7 +221,11 @@ class Settings:
         self.system_name = os.environ.get("AVACORE_SYSTEM_NAME", "AvaCore").strip()
         self.auto_research = os.environ.get("AVACORE_AUTO_RESEARCH", "ask").strip().lower()
         self.voice_enabled = os.environ.get("AVACORE_VOICE_ENABLED", "0").strip() in {
-            "1", "true", "True", "yes", "on"
+            "1",
+            "true",
+            "True",
+            "yes",
+            "on",
         }
         self.voice_model = os.environ.get("AVACORE_VOICE_MODEL", "base").strip()
         self.voice_device = os.environ.get("AVACORE_VOICE_DEVICE", "cpu").strip()
@@ -192,9 +235,13 @@ class Settings:
         ).expanduser()
         self.voice_language = os.environ.get("AVACORE_VOICE_LANGUAGE", "de").strip()
 
-        self.notes_export_enabled = os.environ.get(
-            "AVACORE_NOTES_EXPORT_ENABLED", "0"
-        ).strip() in {"1", "true", "True", "yes", "on"}
+        self.notes_export_enabled = os.environ.get("AVACORE_NOTES_EXPORT_ENABLED", "0").strip() in {
+            "1",
+            "true",
+            "True",
+            "yes",
+            "on",
+        }
 
         self.notes_export_path = Path(
             os.environ.get(
@@ -203,17 +250,23 @@ class Settings:
             )
         ).expanduser()
 
-        self.notes_rclone_enabled = os.environ.get(
-            "AVACORE_NOTES_RCLONE_ENABLED", "0"
-        ).strip() in {"1", "true", "True", "yes", "on"}
+        self.notes_rclone_enabled = os.environ.get("AVACORE_NOTES_RCLONE_ENABLED", "0").strip() in {
+            "1",
+            "true",
+            "True",
+            "yes",
+            "on",
+        }
 
-        self.notes_rclone_remote = os.environ.get(
-            "AVACORE_NOTES_RCLONE_REMOTE", ""
-        ).strip()
+        self.notes_rclone_remote = os.environ.get("AVACORE_NOTES_RCLONE_REMOTE", "").strip()
 
-        self.identity_enabled = os.environ.get(
-            "AVACORE_IDENTITY_ENABLED", "0"
-        ).strip() in {"1", "true", "True", "yes", "on"}
+        self.identity_enabled = os.environ.get("AVACORE_IDENTITY_ENABLED", "0").strip() in {
+            "1",
+            "true",
+            "True",
+            "yes",
+            "on",
+        }
 
         self.identity_dir = Path(
             os.environ.get("AVACORE_IDENTITY_DIR", "./data/vision_identity")
@@ -223,49 +276,37 @@ class Settings:
             "AVACORE_IDENTITY_MODEL", "openai/clip-vit-base-patch32"
         ).strip()
 
-        self.identity_device = os.environ.get(
-            "AVACORE_IDENTITY_DEVICE", "cpu"
-        ).strip()
+        self.identity_device = os.environ.get("AVACORE_IDENTITY_DEVICE", "cpu").strip()
 
-        self.identity_threshold = float(
-            os.environ.get("AVACORE_IDENTITY_THRESHOLD", "0.78")
-        )
+        self.identity_threshold = float(os.environ.get("AVACORE_IDENTITY_THRESHOLD", "0.78"))
 
-        self.identity_margin = float(
-            os.environ.get("AVACORE_IDENTITY_MARGIN", "0.06")
-        )
+        self.identity_margin = float(os.environ.get("AVACORE_IDENTITY_MARGIN", "0.06"))
 
-        self.identity_top_k = int(
-            os.environ.get("AVACORE_IDENTITY_TOP_K", "5")
-        )
+        self.identity_top_k = int(os.environ.get("AVACORE_IDENTITY_TOP_K", "5"))
 
-        self.identity_min_roger_votes = int(
-            os.environ.get("AVACORE_IDENTITY_MIN_ROGER_VOTES", "2")
-        )
+        self.identity_min_roger_votes = int(os.environ.get("AVACORE_IDENTITY_MIN_ROGER_VOTES", "2"))
 
-
-        self.jspace_enabled = os.environ.get(
-            "AVACORE_JSPACE_ENABLED", "0"
-        ).strip() in {"1", "true", "True", "yes", "on"}
+        self.jspace_enabled = os.environ.get("AVACORE_JSPACE_ENABLED", "0").strip() in {
+            "1",
+            "true",
+            "True",
+            "yes",
+            "on",
+        }
 
         self.jspace_path = Path(
             os.environ.get("AVACORE_JSPACE_PATH", "./data/state/jspace.json")
         ).expanduser()
 
-        self.jspace_top_k = int(
-            os.environ.get("AVACORE_JSPACE_TOP_K", "8")
+        self.jspace_top_k = int(os.environ.get("AVACORE_JSPACE_TOP_K", "8"))
+
+        self.jspace_decay = float(os.environ.get("AVACORE_JSPACE_DECAY", "0.92"))
+
+        self.jspace_min_activation = float(os.environ.get("AVACORE_JSPACE_MIN_ACTIVATION", "0.05"))
+
+        self.jspace_focus_mode = (
+            os.environ.get("AVACORE_JSPACE_FOCUS_MODE", "balanced").strip().lower()
         )
 
-        self.jspace_decay = float(
-            os.environ.get("AVACORE_JSPACE_DECAY", "0.92")
-        )
-
-        self.jspace_min_activation = float(
-            os.environ.get("AVACORE_JSPACE_MIN_ACTIVATION", "0.05")
-        )
-
-        self.jspace_focus_mode = os.environ.get(
-            "AVACORE_JSPACE_FOCUS_MODE", "balanced"
-        ).strip().lower()
 
 settings = Settings()

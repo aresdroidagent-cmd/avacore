@@ -426,6 +426,51 @@ For LAN usage, replace `127.0.0.1` with the machine IP.
 
 Security note: the built-in admin password is intended for a trusted local network. Do not expose AvaCore directly to the internet without reverse proxy, HTTPS and stronger authentication.
 
+### German and English replies
+
+Ava replies in German by default. The web chat provides a `Deutsch` / `English`
+selector and stores the selection locally in the browser.
+
+API clients can select the reply language with the optional `language` field on
+`POST /reply`. Supported values are `de` and `en`. Existing clients that omit the
+field remain compatible and receive German replies.
+
+German request:
+
+```bash
+curl -X POST http://127.0.0.1:8787/reply \
+  -H "Content-Type: application/json" \
+  -d '{
+    "channel": "web",
+    "user_id": "web-user",
+    "chat_id": "web-chat",
+    "text": "Erkläre kurz den aktuellen Systemstatus.",
+    "timestamp": 1784960000,
+    "language": "de"
+  }'
+```
+
+English request:
+
+```bash
+curl -X POST http://127.0.0.1:8787/reply \
+  -H "Content-Type: application/json" \
+  -d '{
+    "channel": "web",
+    "user_id": "web-user",
+    "chat_id": "web-chat",
+    "text": "Briefly explain the current system status.",
+    "timestamp": 1784960000,
+    "language": "en"
+  }'
+```
+
+The reply language is intentionally separate from internal model prompts. In
+particular, live camera images continue to use the tested English SmolVLM prompt.
+For German output, Ava translates the resulting camera description afterward.
+Changing the chat language must not translate or replace the internal camera VLM
+prompt.
+
 ## Telegram
 
 Set in `.env`:
@@ -1425,5 +1470,4 @@ JSpace must not silently rewrite durable identity, goals or verified long-term m
 Durable memory still follows AvaCore's reviewed memory workflow:
 
 candidate → verified → usable as trusted long-term context
-
 
