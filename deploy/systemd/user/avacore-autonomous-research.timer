@@ -1,0 +1,12 @@
+[Unit]
+Description=Run AvaCore bounded autonomous research twice daily
+
+[Timer]
+OnCalendar=*-*-* 11:00:00 Europe/Zurich
+OnCalendar=*-*-* 16:00:00 Europe/Zurich
+Persistent=true
+AccuracySec=5min
+Unit=avacore-autonomous-research.service
+
+[Install]
+WantedBy=timers.target

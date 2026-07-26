@@ -1,0 +1,10 @@
+[Unit]
+Description=AvaCore bounded autonomous research
+Wants=avacore-api.service
+After=avacore-api.service network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ares/avacore
+ExecStart=/home/ares/avacore/.venv/bin/python -u /home/ares/avacore/scripts/run_autonomous_research.py
+TimeoutStartSec=10min

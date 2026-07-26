@@ -23,6 +23,7 @@ from avacore.core.language import ReplyLanguage, response_language_rule
 from avacore.core.prompts import looks_like_code_request
 from avacore.core.brain import append_daily_note, load_brain_context
 from avacore.core.decision import decide_context
+from avacore.core.autonomous_research import AutonomousResearchService
 from avacore.memory.sqlite_store import SQLiteStore
 from avacore.memory.auto_memory import AutoMemoryExtractor
 from avacore.model.ollama_backend import OllamaBackend
@@ -155,6 +156,17 @@ backend = OllamaBackend(
     model=settings.ollama_model,
     timeout_ms=settings.ollama_timeout_ms,
 )
+
+
+def autonomous_research_service() -> AutonomousResearchService:
+    return AutonomousResearchService(
+        settings=settings,
+        memory_store=store,
+        backend=backend,
+        ensure_backend=ensure_ollama_runtime,
+    )
+
+
 personality_manager = load_personality_manager()
 policy_engine = PolicyEngine(settings.db_path)
 embedder = Embedder(settings.embedding_model)
@@ -1739,6 +1751,46 @@ def research(
         max_results=payload.max_results,
         save_memory=payload.save_memory,
     )
+
+
+@app.get("/debug/research_queue")
+def debug_research_queue(_: None = Depends(verify_admin_password)) -> dict:
+    try:
+        queue = autonomous_research_service().load_queue()
+        return {"ok": True, "status": "idle", "queue": queue.to_dict()}
+    except Exception as exc:
+        return {"ok": False, "status": "failed", "error": str(exc)}
+
+
+@app.post("/research/autonomous/derive")
+def autonomous_research_derive(
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    try:
+        return autonomous_research_service().derive()
+    except Exception as exc:
+        return {"ok": False, "status": "failed", "error": str(exc)}
+
+
+@app.post("/research/autonomous/run-next")
+def autonomous_research_run_next(
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    try:
+        return autonomous_research_service().run_next()
+    except Exception as exc:
+        return {"ok": False, "status": "failed", "error": str(exc)}
+
+
+@app.post("/research/autonomous/topics/{topic_id}/dismiss")
+def autonomous_research_dismiss(
+    topic_id: str,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    try:
+        return autonomous_research_service().dismiss(topic_id)
+    except Exception as exc:
+        return {"ok": False, "status": "failed", "error": str(exc)}
 
 
 @app.post("/debug/decision")

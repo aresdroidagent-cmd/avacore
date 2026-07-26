@@ -12,6 +12,22 @@ def split_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def bounded_int(name: str, default: int, low: int, high: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    return max(low, min(high, value))
+
+
+def bounded_float(name: str, default: float, low: float, high: float) -> float:
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number") from exc
+    return max(low, min(high, value))
+
+
 class Settings:
     def __init__(self) -> None:
         self.profile_name = os.environ.get("AVACORE_PROFILE", "low_vram")
@@ -205,7 +221,36 @@ class Settings:
             "yes",
             "on",
         }
-        self.research_max_results = int(os.environ.get("AVACORE_RESEARCH_MAX_RESULTS", "4"))
+        self.research_max_results = bounded_int(
+            "AVACORE_RESEARCH_MAX_RESULTS", 4, 1, 8
+        )
+        self.research_queue_path = Path(
+            os.environ.get(
+                "AVACORE_RESEARCH_QUEUE_PATH",
+                "./data/state/research_queue.json",
+            )
+        ).expanduser()
+        self.research_max_runs_per_day = bounded_int(
+            "AVACORE_RESEARCH_MAX_RUNS_PER_DAY", 3, 1, 24
+        )
+        self.research_max_topics_per_run = bounded_int(
+            "AVACORE_RESEARCH_MAX_TOPICS_PER_RUN", 1, 1, 10
+        )
+        self.research_max_sources_per_topic = bounded_int(
+            "AVACORE_RESEARCH_MAX_SOURCES_PER_TOPIC", 5, 1, 8
+        )
+        self.research_min_score = bounded_float(
+            "AVACORE_RESEARCH_MIN_SCORE", 0.65, 0.0, 1.0
+        )
+        self.research_cooldown_hours = bounded_int(
+            "AVACORE_RESEARCH_COOLDOWN_HOURS", 24, 0, 24 * 30
+        )
+        self.research_notify_score = bounded_float(
+            "AVACORE_RESEARCH_NOTIFY_SCORE", 0.80, 0.0, 1.0
+        )
+        self.research_curiosity_weight = bounded_float(
+            "AVACORE_RESEARCH_CURIOSITY_WEIGHT", 0.15, 0.0, 0.5
+        )
         self.research_save_memory_candidate = os.environ.get(
             "AVACORE_RESEARCH_SAVE_MEMORY_CANDIDATE",
             "1",
@@ -220,6 +265,8 @@ class Settings:
         self.assistant_name = os.environ.get("AVACORE_ASSISTANT_NAME", "Ava").strip()
         self.system_name = os.environ.get("AVACORE_SYSTEM_NAME", "AvaCore").strip()
         self.auto_research = os.environ.get("AVACORE_AUTO_RESEARCH", "ask").strip().lower()
+        if self.auto_research not in {"off", "ask", "bounded"}:
+            raise ValueError("AVACORE_AUTO_RESEARCH must be one of: off, ask, bounded")
         self.voice_enabled = os.environ.get("AVACORE_VOICE_ENABLED", "0").strip() in {
             "1",
             "true",

@@ -471,6 +471,29 @@ For German output, Ava translates the resulting camera description afterward.
 Changing the chat language must not translate or replace the internal camera VLM
 prompt.
 
+### Controlled autonomous research
+
+AvaCore can derive research candidates from active JSpace topics and, only in
+`bounded` mode, process at most one topic per scheduler call. It reuses the
+existing DuckDuckGo/source reader, local Ollama backend and reviewed
+`memory_items` workflow. Results always remain `candidate` until manually
+verified.
+
+The safe default is:
+
+```env
+AVACORE_AUTO_RESEARCH=ask
+```
+
+Modes are `off`, `ask` and `bounded`. `AVACORE_RESEARCH_ENABLED` remains the
+master web-research switch. Queue state is stored atomically below `data/state/`
+and is not versioned. Administrative routes expose derivation, the next bounded
+run, queue debug data and topic dismissal. A repository systemd user-timer
+example can run the scheduler twice daily but is never installed automatically.
+
+See [Controlled autonomous research](docs/AUTONOMOUS_RESEARCH.md) for scoring,
+budgets, safety boundaries, API examples, Telegram behavior and timer setup.
+
 ## Telegram
 
 Set in `.env`:
