@@ -25,6 +25,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.request import BaseRequest
 
 from avacore.config.settings import settings
 from avacore.channels.telegram import http_client
@@ -2161,11 +2162,20 @@ async def idcheck_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )       
 
 
-def build_app() -> Application:
+def build_app(
+    *,
+    request: BaseRequest | None = None,
+    get_updates_request: BaseRequest | None = None,
+) -> Application:
     if not settings.telegram_bot_token:
         raise RuntimeError("Missing TELEGRAM_BOT_TOKEN in .env")
 
-    app = Application.builder().token(settings.telegram_bot_token).build()
+    builder = Application.builder().token(settings.telegram_bot_token)
+    if request is not None:
+        builder = builder.request(request)
+    if get_updates_request is not None:
+        builder = builder.get_updates_request(get_updates_request)
+    app = builder.build()
 
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
@@ -2230,8 +2240,12 @@ def build_app() -> Application:
     return app
 
 
-def build_application() -> Application:
-    return build_app()
+def build_application(
+    *,
+    request: BaseRequest | None = None,
+    get_updates_request: BaseRequest | None = None,
+) -> Application:
+    return build_app(request=request, get_updates_request=get_updates_request)
 
 
 def main() -> None:
