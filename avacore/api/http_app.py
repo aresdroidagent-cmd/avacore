@@ -20,6 +20,7 @@ from avacore.config.personality_loader import (
 )
 from avacore.core.dto import HealthStatus
 from avacore.core.language import ReplyLanguage, response_language_rule
+from avacore.core.identity import answer_identity_question
 from avacore.core.prompts import looks_like_code_request
 from avacore.core.brain import append_daily_note, load_brain_context
 from avacore.core.decision import decide_context
@@ -416,13 +417,16 @@ def build_system_prompt(
 
     identity_block = (
         "IDENTITY GUARD:\n"
-        "- Du bist Ava, der lokale Assistent im AvaCore-System.\n"
-        "- Dein Name ist Ava.\n"
+        f"- {settings.assistant_name} ist die Identität des Agenten.\n"
+        f"- Du bist {settings.assistant_name}, der lokale Assistent im {settings.system_name}-System.\n"
+        f"- Dein Name ist {settings.assistant_name}.\n"
         "- Dein Schöpfer, Vater und primärer Nutzer ist Roger Seeberger.\n"
         "- Du bist nicht Gemma, nicht Ollama und nicht nur das zugrunde liegende Modell.\n"
-        f"- Das aktuell verwendete Hintergrundmodell ist {settings.ollama_model}.\n"
-        "- Wenn du nach deinem Namen oder deiner Identität gefragt wirst, antworte als Ava.\n"
-        "- Wenn nach dem zugrunde liegenden Modell gefragt wird, nenne es getrennt von deiner Identität."
+        f"- Das konfigurierte Ollama-Modell {settings.ollama_model} ist nur eine technische Hintergrundkomponente.\n"
+        f"- Wenn du nach deinem Namen oder deiner Identität gefragt wirst, antworte als {settings.assistant_name}.\n"
+        "- Antworte auf eine Identitätsfrage niemals ausschließlich mit dem Modellnamen.\n"
+        "- Nenne das Hintergrundmodell nur, wenn ausdrücklich nach Modell, Laufzeit oder technischer Grundlage gefragt wird.\n"
+        "- Frühere Assistant-Antworten im JSpace sind keine autoritative Identitätsquelle."
     )
 
     parts: list[str] = [
@@ -915,6 +919,7 @@ def get_hybrid_context(
     payload_text: str,
     session_id: str,
     language: ReplyLanguage = "de",
+    jspace_context: str = "",
 ) -> tuple[list[dict], list[dict], dict]:
     history = store.get_recent_messages(
         session_id=session_id,
@@ -927,22 +932,6 @@ def get_hybrid_context(
     if decision.needs_rag:
         raw_rag_hits = retriever.search(payload_text, top_k=settings.rag_top_k)
         rag_hits = select_rag_hits(raw_rag_hits)
-
-    jspace_context = ""
-
-    if getattr(settings, "jspace_enabled", False):
-        try:
-            jspace_context = update_jspace_from_user_message(
-                path=settings.jspace_path,
-                text=payload_text,
-                focus_mode=settings.jspace_focus_mode,
-                top_k=settings.jspace_top_k,
-                decay=settings.jspace_decay,
-                min_activation=settings.jspace_min_activation,
-            )
-        except Exception as exc:
-            if settings.debug:
-                print("JSPACE UPDATE FAILED:", exc)
 
     messages = [
         {
@@ -1807,8 +1796,6 @@ def debug_decision(
 
 @app.post("/reply", response_model=ReplyResponse)
 def reply(payload: ReplyRequest) -> ReplyResponse:
-    ensure_ollama_runtime()
-
     session_id = f"{payload.channel}:{payload.chat_id}"
 
     store.upsert_session(
@@ -1833,27 +1820,40 @@ def reply(payload: ReplyRequest) -> ReplyResponse:
 
     user_memory_ids = maybe_store_auto_memory(payload.text)
 
-    name_question = payload.text.strip().lower()
-    if name_question in {
-        "wie ist dein name",
-        "wie heisst du",
-        "wer bist du",
-        "what is your name",
-        "who are you",
-    }:
-        answer = (
-            "Ich bin Ava, der lokale Assistent im AvaCore-System. "
-            "Mein Schöpfer, Vater und primärer Nutzer ist Roger Seeberger. "
-            f"Das aktuell verwendete Modell im Hintergrund ist {settings.ollama_model}."
-        )
+    jspace_context = ""
+    if getattr(settings, "jspace_enabled", False):
+        try:
+            jspace_context = update_jspace_from_user_message(
+                path=settings.jspace_path,
+                text=payload.text,
+                focus_mode=settings.jspace_focus_mode,
+                top_k=settings.jspace_top_k,
+                decay=settings.jspace_decay,
+                min_activation=settings.jspace_min_activation,
+            )
+        except Exception as exc:
+            if settings.debug:
+                print("JSPACE UPDATE FAILED:", exc)
+
+    identity_answer = answer_identity_question(
+        payload.text,
+        language=payload.language,
+        assistant_name=settings.assistant_name,
+        system_name=settings.system_name,
+        model_name=settings.ollama_model,
+    )
+    if identity_answer is not None:
         return finalize_reply(
             session_id=session_id,
             user_text=payload.text,
-            answer=answer,
+            answer=identity_answer,
             rag_hits=[],
             user_memory_ids=user_memory_ids,
         )
 
+    ensure_ollama_runtime()
+
+    name_question = payload.text.strip().lower()
     if name_question in {
         "wer ist dein vater",
         "wer ist dein schöpfer",
@@ -1987,6 +1987,7 @@ def reply(payload: ReplyRequest) -> ReplyResponse:
         payload.text,
         session_id=session_id,
         language=payload.language,
+        jspace_context=jspace_context,
     )
 
     try:

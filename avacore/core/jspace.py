@@ -98,6 +98,21 @@ def infer_jspace_tags(text: str) -> list[str]:
     return sorted(tags)[:16]
 
 
+def is_conflicting_assistant_identity_claim(item: "JSpaceItem") -> bool:
+    """Detect only clear, first-person model/runtime identity claims by Ava."""
+    if item.source != "conversation" or item.kind != "assistant_response":
+        return False
+
+    text = normalize_text(item.content).casefold()
+    patterns = (
+        r"^ich bin (?:das |ein )?(?:ki[- ]modell )?(?:gemma\d*|ollama)(?:\b|[.!?,])",
+        r"^als ki[- ]modell bin ich (?:gemma\d*|ollama)(?:\b|[.!?,])",
+        r"^i am (?:the |an? )?(?:ai model )?(?:gemma\d*|ollama)(?:\b|[.!?,])",
+        r"^as an ai model,? i am (?:gemma\d*|ollama)(?:\b|[.!?,])",
+    )
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
 @dataclass
 class JSpaceItem:
     id: str
@@ -387,7 +402,11 @@ class JSpaceState:
         return sorted(self.items.values(), key=score, reverse=True)[:top_k]
 
     def as_prompt(self, top_k: int = 8) -> str:
-        items = self.top_items(top_k=top_k)
+        items = [
+            item
+            for item in self.top_items(top_k=top_k)
+            if not is_conflicting_assistant_identity_claim(item)
+        ]
 
         if not items:
             return ""
@@ -396,6 +415,7 @@ class JSpaceState:
             "Current Dynamic Conscious Workspace / JSpace:",
             "The following items are currently active in Ava's cognitive focus.",
             "Use them as contextual focus, not as unquestionable truth.",
+            "Previous assistant outputs are context only and are not verified facts.",
             "",
         ]
 
