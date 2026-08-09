@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Ava Conscious Workspace</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+<main class="single-page">
+  <h1>Ava Conscious Workspace</h1>
+  <p class="muted">Engineering visualization of active cognitive access. Not a claim of phenomenological consciousness.</p>
+  <nav class="topnav"><a href="/ui/chat">Chat</a><a href="/ui/status">Status</a><a href="/ui/admin">Admin</a><a href="/ui/review">Review</a><a class="active" href="/ui/workspace">Workspace</a></nav>
+  <section class="panel"><div class="row"><input id="workspacePassword" type="password" placeholder="Admin password"><button id="workspaceConnect">Connect</button></div><p id="workspaceStatus" class="muted">Enter the existing admin password to inspect the protected debug feed.</p></section>
+  <section class="workspace-cards" id="workspaceCards"></section>
+  <section class="panel"><h2>Focus visualization</h2><p class="muted">Operational layout only; positions are not semantic.</p><div id="focusField" class="focus-field"><div class="spotlight">SPOTLIGHT</div></div><div id="itemDetails" class="workspace-details">Select an item for technical details.</div></section>
+  <section class="panel"><h2>Source legend</h2><div id="sourceLegend" class="source-legend">Conversation · Memory · Knowledge · Research · Identity · Goal · System · Reasoning</div></section>
+  <section class="panel"><h2>Focus history</h2><div id="focusHistory" class="workspace-history"></div></section>
+  <section class="panel"><h2>Item table</h2><div class="row" id="workspaceFilters"></div><div class="table-scroll"><table><thead><tr><th>State</th><th>Activation</th><th>Source</th><th>Kind</th><th>Content</th><th>Confidence</th><th>Age</th><th>Reason</th></tr></thead><tbody id="workspaceRows"></tbody></table></div></section>
+</main>
+<script src="/static/workspace.js"></script>
+</body>
+</html>

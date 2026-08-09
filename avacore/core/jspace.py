@@ -123,13 +123,22 @@ class JSpaceItem:
     activation: float = 0.5
     priority: float = 0.5
     persistence: float = 0.5
+    confidence: float = 0.5
+    relevance: float = 0.5
+    novelty: float = 0.5
+    recency: float = 1.0
+    urgency: float = 0.0
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
     last_seen_at: str | None = None
+    source_ref: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "JSpaceItem":
+        kind = str(data.get("kind", "item"))
+        if str(data.get("source", "unknown")) == "identity" and kind == "self_anchor":
+            kind = "identity_anchor"
         return cls(
             id=str(
                 data.get("id")
@@ -140,15 +149,21 @@ class JSpaceItem:
                 )
             ),
             source=str(data.get("source", "unknown")),
-            kind=str(data.get("kind", "item")),
+            kind=kind,
             content=str(data.get("content", "")),
             tags=list(data.get("tags") or []),
             activation=clamp(float(data.get("activation", 0.5))),
             priority=clamp(float(data.get("priority", 0.5))),
             persistence=clamp(float(data.get("persistence", 0.5))),
+            confidence=clamp(float(data.get("confidence", 0.5))),
+            relevance=clamp(float(data.get("relevance", data.get("activation", 0.5)))),
+            novelty=clamp(float(data.get("novelty", 0.5))),
+            recency=clamp(float(data.get("recency", 1.0))),
+            urgency=clamp(float(data.get("urgency", 0.0))),
             created_at=str(data.get("created_at") or utc_now()),
             updated_at=str(data.get("updated_at") or utc_now()),
             last_seen_at=data.get("last_seen_at"),
+            source_ref=data.get("source_ref"),
             metadata=dict(data.get("metadata") or {}),
         )
 
@@ -216,7 +231,7 @@ class JSpaceState:
     def seed_core_items(self) -> None:
         self.inject(
             source="identity",
-            kind="self_anchor",
+            kind="identity_anchor",
             content="Ava is Roger Seeberger's local assistant running in AvaCore.",
             tags=["ava", "roger", "identity", "avacore"],
             activation_boost=0.7,
@@ -294,6 +309,12 @@ class JSpaceState:
         priority: float = 0.5,
         persistence: float = 0.5,
         metadata: dict[str, Any] | None = None,
+        confidence: float = 0.5,
+        relevance: float | None = None,
+        novelty: float = 0.5,
+        recency: float = 1.0,
+        urgency: float = 0.0,
+        source_ref: str | None = None,
     ) -> JSpaceItem:
         content = normalize_text(content)
 
@@ -314,6 +335,12 @@ class JSpaceState:
             item.last_seen_at = now
             if metadata:
                 item.metadata.update(metadata)
+            item.confidence = max(item.confidence, clamp(confidence))
+            item.relevance = max(item.relevance, clamp(relevance if relevance is not None else activation_boost))
+            item.novelty = max(item.novelty, clamp(novelty))
+            item.recency = max(item.recency, clamp(recency))
+            item.urgency = max(item.urgency, clamp(urgency))
+            item.source_ref = source_ref or item.source_ref
             return item
 
         item = JSpaceItem(
@@ -325,9 +352,15 @@ class JSpaceState:
             activation=clamp(activation_boost),
             priority=clamp(priority),
             persistence=clamp(persistence),
+            confidence=clamp(confidence),
+            relevance=clamp(relevance if relevance is not None else activation_boost),
+            novelty=clamp(novelty),
+            recency=clamp(recency),
+            urgency=clamp(urgency),
             created_at=now,
             updated_at=now,
             last_seen_at=now,
+            source_ref=source_ref,
             metadata=metadata or {},
         )
 
@@ -356,6 +389,8 @@ class JSpaceState:
 
         item = self.inject(
             source="conversation",
+            # Legacy helper retains its persisted kind. The Conscious Workspace
+            # cycle uses the canonical ``user_input`` kind directly.
             kind="user_message",
             content=text[:500],
             tags=tags,
@@ -363,6 +398,10 @@ class JSpaceState:
             priority=0.65,
             persistence=0.45,
             metadata={"role": "user"},
+            confidence=0.35,
+            relevance=1.0,
+            novelty=0.8,
+            recency=1.0,
         )
 
         self.reinforce_by_tags(tags, amount=0.06)
@@ -384,6 +423,8 @@ class JSpaceState:
             priority=0.45,
             persistence=0.35,
             metadata={"role": "assistant"},
+            confidence=0.25,
+            relevance=0.45,
         )
 
         self.reinforce_by_tags(tags, amount=0.03)

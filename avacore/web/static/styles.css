@@ -5,6 +5,20 @@ body {
   color: #e2e8f0;
 }
 
+.workspace-cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin:18px 0; }
+.workspace-card { background:#172033; border:1px solid #334155; border-radius:12px; padding:14px; display:flex; flex-direction:column; gap:8px; }
+.workspace-card strong { overflow-wrap:anywhere; }
+.focus-field { position:relative; min-height:460px; overflow:hidden; border:1px solid #334155; border-radius:16px; background:radial-gradient(circle at center,rgba(250,204,21,.18),rgba(15,23,42,.1) 35%,rgba(2,6,23,.8) 70%); }
+.spotlight { position:absolute; left:35%; top:28%; width:30%; height:42%; border:2px dashed #facc15; border-radius:50%; display:grid; place-items:start center; padding-top:12px; color:#fde68a; pointer-events:none; }
+.node { position:absolute; transform:translate(-50%,-50%); border-radius:50%; border:2px solid #f8fafc; box-shadow:0 0 18px currentColor; padding:0; min-width:0; }
+.node.latent { opacity:.42; border-style:dashed; box-shadow:none; }
+.workspace-details pre { white-space:pre-wrap; overflow-wrap:anywhere; }
+.source-legend { word-spacing:12px; line-height:2; }
+.workspace-history { display:grid; gap:6px; }
+.table-scroll { overflow:auto; }
+.table-scroll table { width:100%; border-collapse:collapse; }
+.table-scroll th,.table-scroll td { text-align:left; padding:8px; border-bottom:1px solid #334155; vertical-align:top; }
+
 a {
   color: #93c5fd;
   text-decoration: none;

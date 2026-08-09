@@ -2,6 +2,8 @@
 
 AvaCore is a local AI assistant core for Roger Seeberger's workstation and LAN environment. It combines a local Ollama language model, Telegram, FastAPI, document/image RAG, SQLite memory, web research, camera snapshots, calendar briefings and a shared long-term brain.
 
+The Phase 1 Conscious Workspace integrates conversation, identity, verified memory, knowledge retrieval, and research into the existing JSpace cognitive field. A deterministic attention cycle selects a bounded `CONSCIOUS WORKSPACE` for `/reply`; inspect it at `/ui/workspace` or the protected `/debug/workspace` endpoints. See [docs/CONSCIOUS_WORKSPACE_PHASE1.md](docs/CONSCIOUS_WORKSPACE_PHASE1.md). This is an engineering model of cognitive access, not a claim of phenomenological consciousness.
+
 The goal is not a toy chatbot. AvaCore is intended as a practical local assistant that can help with robotics, computer vision, AI engineering, research, documentation, automation and project continuity over longer periods of time.
 
 <p>

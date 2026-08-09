@@ -46,9 +46,16 @@ from avacore.mail.service import MailService
 from avacore.vision.describe import describe_image_with_smolvlm, detect_image_mode
 from avacore.system.ollama_runtime import start_ollama_server
 from avacore.core.jspace import (
+    clamp,
     read_jspace_debug,
     update_jspace_from_assistant_response,
-    update_jspace_from_user_message,
+)
+from avacore.core.cognitive_workspace import (
+    lexical_relevance,
+    read_workspace_debug,
+    read_workspace_history,
+    run_workspace_cycle,
+    workspace_prompt,
 )
 
 _ollama_process = None
@@ -206,6 +213,11 @@ class ReplyRequest(BaseModel):
 
 class ReplyResponse(BaseModel):
     reply: str
+
+
+class WorkspaceCycleDebugRequest(BaseModel):
+    text: str
+    attention_mode: str = "focused"
 
 
 class ResetRequest(BaseModel):
@@ -390,10 +402,8 @@ def build_system_prompt(
     1. Shared Brain / identity / runtime context
     2. Hard identity guard
     3. Active personality profile
-    4. Verified long-term memories
-    5. RAG excerpts
-    6. Dynamic Conscious Workspace / JSpace
-    7. Final operating rules
+    4. Conscious Workspace (the sole dynamic context block)
+    5. Final operating rules
     """
 
     profile = load_active_personality_profile()
@@ -435,39 +445,25 @@ def build_system_prompt(
         personality_prompt,
     ]
 
-    if memory_scope:
-        try:
-            memory_lines = store.get_verified_memory_prompt_lines(
-                scope=memory_scope,
-                limit=12,
-            )
-        except Exception as exc:
-            memory_lines = [
-                f"- Verified memories konnten nicht geladen werden: {exc}"
-            ]
-
-        if memory_lines:
-            parts.append("VERIFIED LONG-TERM MEMORY:\n" + "\n".join(memory_lines))
-
-    if rag_hits:
-        rag_lines: list[str] = []
-
-        for hit in rag_hits:
-            title = str(hit.get("title", "Unbekannte Quelle"))
-            label = title
-
-            if hit.get("page_number"):
-                label += f" (Seite {hit['page_number']})"
-
-            score = float(hit.get("score", 0.0))
-            content = str(hit.get("content", "")).strip()
-            if not content:
-                continue
-
-            rag_lines.append(f"- {label} [Score {score:.2f}]: {content}")
-
-        if rag_lines:
-            parts.append("LOCAL KNOWLEDGE BASE / RAG EXCERPTS:\n" + "\n".join(rag_lines))
+    # Compatibility path: disabling the JSpace master switch preserves the
+    # pre-workspace prompt behavior. When enabled, these sources appear only
+    # through the selected workspace below.
+    if not getattr(settings, "jspace_enabled", False):
+        if memory_scope:
+            try:
+                memory_lines = store.get_verified_memory_prompt_lines(scope=memory_scope, limit=12)
+            except Exception as exc:
+                memory_lines = [f"- Verified memories konnten nicht geladen werden: {exc}"]
+            if memory_lines:
+                parts.append("VERIFIED LONG-TERM MEMORY:\n" + "\n".join(memory_lines))
+        if rag_hits:
+            rag_lines = []
+            for hit in rag_hits:
+                content = str(hit.get("content") or "").strip()
+                if content:
+                    rag_lines.append(f"- {hit.get('title', 'Unbekannte Quelle')} [Score {float(hit.get('score', 0.0)):.2f}]: {content}")
+            if rag_lines:
+                parts.append("LOCAL KNOWLEDGE BASE / RAG EXCERPTS:\n" + "\n".join(rag_lines))
 
     if jspace_context:
         parts.append(jspace_context)
@@ -721,6 +717,28 @@ def run_research_workflow(query: str, max_results: int | None = None, save_memor
                 created_from_assistant_text=answer,
             )
 
+        if getattr(settings, "jspace_enabled", False):
+            research_candidate = {
+                "source": "research", "kind": "research_finding",
+                "content": f"{query}: {answer[:1200]}", "relevance": 0.9,
+                "activation": 0.85, "priority": 0.75, "persistence": 0.75,
+                "confidence": 0.6, "source_ref": f"research:{memory_id or query[:80]}",
+                "tags": ["research", "web"],
+                "metadata": {"summary": answer, "sources": serialize_sources(sources), "uncertainties": True, "memory_id": memory_id},
+            }
+            run_workspace_cycle(
+                jspace_path=settings.jspace_path, workspace_path=settings.workspace_path,
+                stimulus=query, candidates=[research_candidate], trigger="research_completion",
+                attention_mode=settings.workspace_default_mode,
+                max_active_items=settings.workspace_max_active_items,
+                max_latent_items=settings.workspace_max_latent_items,
+                min_activation=settings.workspace_min_activation,
+                decay_factor=settings.workspace_decay_factor,
+                max_per_source=settings.workspace_max_per_source,
+                max_per_kind=settings.workspace_max_per_kind,
+                history_limit=settings.workspace_history_limit,
+            )
+
         return {
             "ok": True,
             "query": query,
@@ -933,6 +951,54 @@ def get_hybrid_context(
         raw_rag_hits = retriever.search(payload_text, top_k=settings.rag_top_k)
         rag_hits = select_rag_hits(raw_rag_hits)
 
+    candidates: list[dict] = []
+    try:
+        memories = store.list_memory_items(status="verified", scope="user", limit=24)
+    except Exception:
+        memories = []
+    for memory in memories:
+        content = f"{memory.get('title', '')}: {memory.get('content', '')}".strip(": ")
+        relevance = lexical_relevance(payload_text, content)
+        candidates.append({
+            "source": "memory", "kind": "memory", "content": content,
+            "relevance": relevance, "activation": relevance,
+            "priority": min(1.0, float(memory.get("importance", 0)) / 5.0),
+            "persistence": 0.8, "confidence": max(0.7, float(memory.get("confidence", 0.0))),
+            "source_ref": f"memory:{memory.get('id')}",
+            "tags": str(memory.get("tags") or "").split(","),
+            "metadata": {"status": "verified", "memory_id": memory.get("id")},
+        })
+    for hit in rag_hits:
+        content = str(hit.get("content") or "").strip()
+        candidates.append({
+            "source": "knowledge", "kind": "knowledge_hit", "content": content,
+            "relevance": clamp(float(hit.get("score", 0.0))), "activation": float(hit.get("score", 0.0)),
+            "priority": 0.6, "persistence": 0.45, "confidence": 0.65,
+            "source_ref": str(hit.get("source_path") or hit.get("chunk_id") or hit.get("id") or hit.get("title")),
+            "metadata": {"title": hit.get("title"), "page_number": hit.get("page_number"), "retrieval_score": hit.get("score")},
+        })
+    for old in history:
+        candidates.append({
+            "source": "conversation", "kind": "assistant_response" if old["role"] == "assistant" else "user_input",
+            "content": old["content"][:1000], "relevance": lexical_relevance(payload_text, old["content"]),
+            "priority": 0.35, "persistence": 0.3, "confidence": 0.25,
+            "metadata": {"role": old["role"], "verified": False},
+        })
+
+    snapshot = run_workspace_cycle(
+        jspace_path=settings.jspace_path, workspace_path=settings.workspace_path,
+        stimulus=payload_text, candidates=candidates,
+        attention_mode=settings.workspace_default_mode,
+        max_active_items=settings.workspace_max_active_items,
+        max_latent_items=settings.workspace_max_latent_items,
+        min_activation=settings.workspace_min_activation,
+        decay_factor=settings.workspace_decay_factor,
+        max_per_source=settings.workspace_max_per_source,
+        max_per_kind=settings.workspace_max_per_kind,
+        history_limit=settings.workspace_history_limit,
+    ) if getattr(settings, "jspace_enabled", False) else None
+    jspace_context = workspace_prompt(snapshot) if snapshot else ""
+
     messages = [
         {
             "role": "system",
@@ -944,7 +1010,6 @@ def get_hybrid_context(
             ),
         }
     ]
-    messages.extend(history)
     messages.append({"role": "user", "content": payload_text})
 
     return messages, rag_hits, decision.to_dict()
@@ -1015,6 +1080,11 @@ def ui_admin():
 @app.get("/ui/review", include_in_schema=False)
 def ui_review():
     return FileResponse(WEB_STATIC_DIR / "review.html")
+
+
+@app.get("/ui/workspace", include_in_schema=False)
+def ui_workspace():
+    return FileResponse(WEB_STATIC_DIR / "workspace.html")
 
 
 @app.get("/ui/avatar", include_in_schema=False)
@@ -1167,6 +1237,43 @@ def debug_jspace(_: None = Depends(verify_admin_password)) -> dict:
         "enabled": True,
         "state": state,
     }
+
+
+@app.get("/debug/workspace")
+def debug_workspace(_: None = Depends(verify_admin_password)) -> dict:
+    return read_workspace_debug(
+        settings.workspace_path,
+        enabled=getattr(settings, "jspace_enabled", False),
+    )
+
+
+@app.get("/debug/workspace/history")
+def debug_workspace_history(_: None = Depends(verify_admin_password)) -> dict:
+    return {"enabled": getattr(settings, "jspace_enabled", False), "history": read_workspace_history(settings.workspace_path)}
+
+
+@app.post("/debug/workspace/cycle")
+def debug_workspace_cycle(
+    payload: WorkspaceCycleDebugRequest,
+    _: None = Depends(verify_admin_password),
+) -> dict:
+    if payload.attention_mode not in {"focused", "associative", "urgent"}:
+        raise HTTPException(status_code=400, detail="invalid attention mode")
+    if not getattr(settings, "jspace_enabled", False):
+        return {"enabled": False, "message": "JSpace is disabled"}
+    snapshot = run_workspace_cycle(
+        jspace_path=settings.jspace_path, workspace_path=settings.workspace_path,
+        stimulus=payload.text, attention_mode=payload.attention_mode,
+        max_active_items=settings.workspace_max_active_items,
+        max_latent_items=settings.workspace_max_latent_items,
+        min_activation=settings.workspace_min_activation,
+        decay_factor=settings.workspace_decay_factor,
+        max_per_source=settings.workspace_max_per_source,
+        max_per_kind=settings.workspace_max_per_kind,
+        history_limit=settings.workspace_history_limit,
+        trigger="debug_override",
+    )
+    return read_workspace_debug(settings.workspace_path, enabled=True)
 
 
 # -----------------------------------------------------------------------------
@@ -1820,20 +1927,11 @@ def reply(payload: ReplyRequest) -> ReplyResponse:
 
     user_memory_ids = maybe_store_auto_memory(payload.text)
 
-    jspace_context = ""
-    if getattr(settings, "jspace_enabled", False):
-        try:
-            jspace_context = update_jspace_from_user_message(
-                path=settings.jspace_path,
-                text=payload.text,
-                focus_mode=settings.jspace_focus_mode,
-                top_k=settings.jspace_top_k,
-                decay=settings.jspace_decay,
-                min_activation=settings.jspace_min_activation,
-            )
-        except Exception as exc:
-            if settings.debug:
-                print("JSPACE UPDATE FAILED:", exc)
+    messages, rag_hits, _decision_dict = get_hybrid_context(
+        payload.text,
+        session_id=session_id,
+        language=payload.language,
+    )
 
     identity_answer = answer_identity_question(
         payload.text,
@@ -1982,13 +2080,6 @@ def reply(payload: ReplyRequest) -> ReplyResponse:
             rag_hits=[],
             user_memory_ids=user_memory_ids,
         )
-
-    messages, rag_hits, _decision_dict = get_hybrid_context(
-        payload.text,
-        session_id=session_id,
-        language=payload.language,
-        jspace_context=jspace_context,
-    )
 
     try:
         answer = backend.chat(messages)

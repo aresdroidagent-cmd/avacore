@@ -9,6 +9,7 @@ from typing import Any
 import requests
 
 from avacore.core.jspace import JSpaceState, clamp
+from avacore.core.cognitive_workspace import read_workspace_debug, run_workspace_cycle
 from avacore.core.research_curiosity import derive_topics, is_researchable_item
 from avacore.core.research_queue import (
     ResearchQueue,
@@ -98,8 +99,11 @@ class AutonomousResearchService:
                 queued_topic.updated_at = utc_now()
                 queued_topic.error = "filtered as non-researchable internal context"
 
+        workspace = read_workspace_debug(getattr(self.settings, "workspace_path", "./data/state/conscious_workspace.json"))
+        focused_ids = [item["id"] for item in workspace.get("active_items", [])]
+        focused_items = [state.items[item_id] for item_id in focused_ids if item_id in state.items]
         derived = derive_topics(
-            state.top_items(top_k=max(self.settings.jspace_top_k, 16)),
+            focused_items or state.top_items(top_k=max(self.settings.jspace_top_k, 16)),
             curiosity_weight=self.settings.research_curiosity_weight,
         )
         created = 0
@@ -114,6 +118,22 @@ class AutonomousResearchService:
             stored, is_new = queue.add_or_update(topic)
             created += int(is_new)
             accepted.append(stored)
+            state.inject(
+                source="research",
+                kind="research_question",
+                content=stored.question,
+                tags=stored.tags,
+                activation_boost=stored.score,
+                priority=stored.score,
+                persistence=0.6,
+                confidence=0.3,
+                relevance=stored.score,
+                urgency=stored.score_components.get("urgency", 0.0),
+                source_ref=stored.id,
+                metadata={"topic_id": stored.id, "status": stored.status, "uncertainty": 1.0},
+            )
+        if accepted:
+            state.save(self.settings.jspace_path)
         queue.save(self.queue_path)
         return {
             "ok": True,
@@ -330,7 +350,7 @@ class AutonomousResearchService:
         )
         state.inject(
             source="research",
-            kind="finding",
+            kind="research_finding",
             content=f"{topic.title}: {answer[:500]}",
             tags=sorted(set(["research"] + topic.tags)),
             activation_boost=clamp(0.35 + topic.score * 0.45),
@@ -338,11 +358,33 @@ class AutonomousResearchService:
             persistence=clamp(0.25 + topic.score * 0.55),
             metadata={
                 "research_topic_id": topic.id,
+                "topic_id": topic.id,
                 "memory_id": topic.result_memory_id,
                 "score": topic.score,
+                "confidence": min(0.8, max(0.4, topic.score)),
+                "uncertainties": True,
             },
+            confidence=min(0.8, max(0.4, topic.score)),
+            relevance=topic.score,
+            source_ref=topic.id,
         )
         state.save(self.settings.jspace_path)
+        if hasattr(self.settings, "workspace_path"):
+            run_workspace_cycle(
+                jspace_path=self.settings.jspace_path,
+                workspace_path=self.settings.workspace_path,
+                stimulus=topic.question,
+                candidates=[],
+                attention_mode=self.settings.workspace_default_mode,
+                max_active_items=self.settings.workspace_max_active_items,
+                max_latent_items=self.settings.workspace_max_latent_items,
+                min_activation=self.settings.workspace_min_activation,
+                decay_factor=self.settings.workspace_decay_factor,
+                max_per_source=self.settings.workspace_max_per_source,
+                max_per_kind=self.settings.workspace_max_per_kind,
+                history_limit=self.settings.workspace_history_limit,
+                trigger="autonomous_research_completion",
+            )
 
     def _notify_if_needed(self, topic: ResearchTopic, answer: str) -> str:
         if topic.score < self.settings.research_notify_score:

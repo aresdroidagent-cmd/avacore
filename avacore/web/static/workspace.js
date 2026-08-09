@@ -1,0 +1,21 @@
+const sources = ["All", "Active", "Latent", "Conversation", "Memory", "Knowledge", "Research", "Identity"];
+const colors = {conversation:"#6ee7ff",memory:"#a78bfa",knowledge:"#60a5fa",research:"#34d399",identity:"#fbbf24",goal:"#fb7185",system:"#94a3b8",reasoning:"#f472b6"};
+let currentFilter = "All", latest = null;
+const password = () => document.getElementById("workspacePassword").value || localStorage.getItem("avacoreWorkspacePassword") || "";
+async function api(path) { const response = await fetch(path, {headers:{"X-Admin-Password":password()}}); if (!response.ok) throw new Error(`${response.status} ${response.statusText}`); return response.json(); }
+function age(value) { const seconds = Math.max(0, (Date.now()-Date.parse(value))/1000); return seconds < 60 ? `${Math.round(seconds)}s` : `${Math.round(seconds/60)}m`; }
+function render(data) {
+  latest=data; const active=data.active_items||[], latent=data.latent_items||[], all=[...active.map(x=>({...x,state:"Active"})),...latent.map(x=>({...x,state:"Latent"}))];
+  const cards=[["Current Focus",data.current_focus||"—"],["Attention Mode",data.attention_mode||"—"],["Cycle ID",data.cycle_id||"—"],["Active Items",active.length],["Latent Items",latent.length],["Dominant Source",(data.dominant_sources||[])[0]||"—"],["Last Update",data.timestamp||"—"]];
+  document.getElementById("workspaceCards").innerHTML=cards.map(([a,b])=>`<article class="workspace-card"><small>${a}</small><strong>${b}</strong></article>`).join("");
+  const field=document.getElementById("focusField"); field.querySelectorAll("button.node").forEach(x=>x.remove());
+  all.forEach((item,index)=>{ const button=document.createElement("button"); button.className=`node ${item.state.toLowerCase()}`; const p=item.projection||{}; button.style.left=`calc(50% + ${(p.x||0)*42}%)`; button.style.top=`calc(50% + ${(p.y||0)*42}%)`; button.style.width=button.style.height=`${18+item.activation_score*34}px`; button.style.background=colors[item.source]||"#aaa"; button.title=`${item.source}/${item.kind}`; button.onclick=()=>showDetails(item); field.appendChild(button); });
+  const filtered=all.filter(item=>currentFilter==="All"||item.state===currentFilter||item.source===currentFilter.toLowerCase());
+  document.getElementById("workspaceRows").innerHTML=filtered.map(item=>`<tr><td>${item.state}</td><td>${item.activation_score.toFixed(2)}</td><td>${item.source}</td><td>${item.kind}</td><td>${escapeHtml(item.content).slice(0,180)}</td><td>${item.confidence.toFixed(2)}</td><td>${age(item.updated_at)}</td><td>${item.selection_reason}</td></tr>`).join("");
+}
+function escapeHtml(value){const div=document.createElement("div");div.textContent=value||"";return div.innerHTML;}
+function showDetails(item){document.getElementById("itemDetails").innerHTML=`<h3>${item.source}/${item.kind}</h3><p>${escapeHtml(item.content)}</p><pre>${escapeHtml(JSON.stringify({activation:item.activation_score,score_components:item.score_components,selection_reason:item.selection_reason,confidence:item.confidence,source_ref:item.source_ref,age:age(item.updated_at),projection:item.projection},null,2))}</pre>`;}
+async function refresh(){try{const [data,history]=await Promise.all([api("/debug/workspace"),api("/debug/workspace/history")]);render(data);document.getElementById("focusHistory").innerHTML=(history.history||[]).slice().reverse().map(x=>`<div>${new Date(x.timestamp).toLocaleTimeString()} — ${escapeHtml(x.active_topic||"—")}</div>`).join("");document.getElementById("workspaceStatus").textContent="Live · polling every 2 seconds";}catch(error){document.getElementById("workspaceStatus").textContent=`Unavailable: ${error.message}`;}}
+document.getElementById("workspaceFilters").innerHTML=sources.map(x=>`<button class="secondary" data-filter="${x}">${x}</button>`).join(""); document.getElementById("workspaceFilters").onclick=e=>{if(e.target.dataset.filter){currentFilter=e.target.dataset.filter;if(latest)render(latest);}};
+document.getElementById("workspaceConnect").onclick=()=>{localStorage.setItem("avacoreWorkspacePassword",password());refresh();}; document.getElementById("workspacePassword").value=localStorage.getItem("avacoreWorkspacePassword")||"";
+refresh(); setInterval(refresh,2000);
