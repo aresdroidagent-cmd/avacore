@@ -56,6 +56,11 @@ def infer_jspace_tags(text: str) -> list[str]:
         "bacnet": "industrial",
         "podman": "devops",
         "github": "github",
+        "telegram": "telegram",
+        "ipv4": "ipv4",
+        "ipv6": "ipv6",
+        "network": "networking",
+        "netzwerk": "networking",
         "python": "programming",
         "debug": "debugging",
         "fehler": "debugging",
@@ -128,6 +133,10 @@ class JSpaceItem:
     novelty: float = 0.5
     recency: float = 1.0
     urgency: float = 0.0
+    self_affinity: float = 0.0
+    continuity: float = 0.0
+    goal_affinity: float = 0.0
+    authority: float = 0.0
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
     last_seen_at: str | None = None
@@ -160,6 +169,10 @@ class JSpaceItem:
             novelty=clamp(float(data.get("novelty", 0.5))),
             recency=clamp(float(data.get("recency", 1.0))),
             urgency=clamp(float(data.get("urgency", 0.0))),
+            self_affinity=clamp(float(data.get("self_affinity", 1.0 if kind == "identity_anchor" else 0.0))),
+            continuity=clamp(float(data.get("continuity", 0.0))),
+            goal_affinity=clamp(float(data.get("goal_affinity", 0.0))),
+            authority=clamp(float(data.get("authority", 1.0 if kind == "identity_anchor" else 0.0))),
             created_at=str(data.get("created_at") or utc_now()),
             updated_at=str(data.get("updated_at") or utc_now()),
             last_seen_at=data.get("last_seen_at"),
@@ -314,6 +327,10 @@ class JSpaceState:
         novelty: float = 0.5,
         recency: float = 1.0,
         urgency: float = 0.0,
+        self_affinity: float = 0.0,
+        continuity: float = 0.0,
+        goal_affinity: float = 0.0,
+        authority: float = 0.0,
         source_ref: str | None = None,
     ) -> JSpaceItem:
         content = normalize_text(content)
@@ -340,6 +357,10 @@ class JSpaceState:
             item.novelty = max(item.novelty, clamp(novelty))
             item.recency = max(item.recency, clamp(recency))
             item.urgency = max(item.urgency, clamp(urgency))
+            item.self_affinity = max(item.self_affinity, clamp(self_affinity))
+            item.continuity = max(item.continuity, clamp(continuity))
+            item.goal_affinity = max(item.goal_affinity, clamp(goal_affinity))
+            item.authority = max(item.authority, clamp(authority))
             item.source_ref = source_ref or item.source_ref
             return item
 
@@ -357,6 +378,10 @@ class JSpaceState:
             novelty=clamp(novelty),
             recency=clamp(recency),
             urgency=clamp(urgency),
+            self_affinity=clamp(self_affinity),
+            continuity=clamp(continuity),
+            goal_affinity=clamp(goal_affinity),
+            authority=clamp(authority),
             created_at=now,
             updated_at=now,
             last_seen_at=now,

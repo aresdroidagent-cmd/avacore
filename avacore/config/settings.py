@@ -360,16 +360,25 @@ class Settings:
         self.workspace_path = Path(
             os.environ.get("AVACORE_WORKSPACE_PATH", "./data/state/conscious_workspace.json")
         ).expanduser()
-        self.workspace_max_active_items = bounded_int("AVACORE_WORKSPACE_MAX_ACTIVE_ITEMS", 12, 2, 32)
+        self.workspace_max_active_items = bounded_int("AVACORE_WORKSPACE_MAX_ACTIVE_ITEMS", 10, 2, 32)
         self.workspace_max_latent_items = bounded_int("AVACORE_WORKSPACE_MAX_LATENT_ITEMS", 40, 0, 200)
         self.workspace_min_activation = bounded_float("AVACORE_WORKSPACE_MIN_ACTIVATION", 0.20, 0.0, 1.0)
         self.workspace_decay_factor = bounded_float("AVACORE_WORKSPACE_DECAY_FACTOR", 0.90, 0.1, 1.0)
         self.workspace_default_mode = os.environ.get("AVACORE_WORKSPACE_DEFAULT_MODE", "focused").strip().lower()
         if self.workspace_default_mode not in {"focused", "associative", "urgent"}:
             raise ValueError("AVACORE_WORKSPACE_DEFAULT_MODE must be focused, associative, or urgent")
-        self.workspace_history_limit = bounded_int("AVACORE_WORKSPACE_HISTORY_LIMIT", 20, 1, 100)
+        history_default = os.environ.get("AVACORE_WORKSPACE_HISTORY_SIZE", "20")
+        self.workspace_history_limit = bounded_int("AVACORE_WORKSPACE_HISTORY_LIMIT", int(history_default), 1, 100)
         self.workspace_max_per_source = bounded_int("AVACORE_WORKSPACE_MAX_PER_SOURCE", 4, 1, 16)
         self.workspace_max_per_kind = bounded_int("AVACORE_WORKSPACE_MAX_PER_KIND", 4, 1, 16)
+        self.working_memory_path = Path(os.environ.get("AVACORE_WORKING_MEMORY_PATH", "./data/state/working_memory.json")).expanduser()
+        self.self_model_path = Path(os.environ.get("AVACORE_SELF_MODEL_PATH", "./data/state/self_model.json")).expanduser()
+        self.working_memory_max_items = bounded_int("AVACORE_WORKING_MEMORY_MAX_ITEMS", 24, 8, 100)
+        self.working_memory_active_items = bounded_int("AVACORE_WORKING_MEMORY_ACTIVE_ITEMS", 10, 2, 32)
+        # Source-sensitive names make the decay policy explicit while retaining
+        # AVACORE_WORKSPACE_DECAY_FACTOR as a compatible general fallback.
+        self.workspace_decay_conversation = bounded_float("AVACORE_WORKSPACE_DECAY_CONVERSATION", 0.85, 0.1, 1.0)
+        self.workspace_decay_general = bounded_float("AVACORE_WORKSPACE_DECAY_GENERAL", 0.92, 0.1, 1.0)
 
 
 settings = Settings()

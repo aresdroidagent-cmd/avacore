@@ -6,10 +6,12 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from pathlib import Path
 import re
+import time
+import uuid
 from collections import defaultdict
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -51,14 +53,19 @@ from avacore.core.jspace import (
     update_jspace_from_assistant_response,
 )
 from avacore.core.cognitive_workspace import (
+    SelfModel,
+    WorkingMemory,
+    assimilate_response,
     lexical_relevance,
     read_workspace_debug,
     read_workspace_history,
     run_workspace_cycle,
+    run_post_llm_gate,
     workspace_prompt,
 )
 
 _ollama_process = None
+_pending_cognitive_cycles: dict[str, dict] = {}
 
 # http_app.py is in avacore/api/http_app.py.
 # Static web files now live in avacore/web/static.
@@ -85,7 +92,7 @@ def ensure_ollama_runtime() -> None:
         )
 
 
-def verify_admin_password(x_admin_password: str | None = Header(default=None)) -> None:
+async def verify_admin_password(x_admin_password: str | None = Header(default=None)) -> None:
     expected = (getattr(settings, "web_admin_password", "") or "").strip()
     if not expected:
         raise HTTPException(status_code=503, detail="Admin password is not configured.")
@@ -426,17 +433,11 @@ def build_system_prompt(
         )
 
     identity_block = (
-        "IDENTITY GUARD:\n"
-        f"- {settings.assistant_name} ist die Identität des Agenten.\n"
-        f"- Du bist {settings.assistant_name}, der lokale Assistent im {settings.system_name}-System.\n"
-        f"- Dein Name ist {settings.assistant_name}.\n"
-        "- Dein Schöpfer, Vater und primärer Nutzer ist Roger Seeberger.\n"
-        "- Du bist nicht Gemma, nicht Ollama und nicht nur das zugrunde liegende Modell.\n"
-        f"- Das konfigurierte Ollama-Modell {settings.ollama_model} ist nur eine technische Hintergrundkomponente.\n"
-        f"- Wenn du nach deinem Namen oder deiner Identität gefragt wirst, antworte als {settings.assistant_name}.\n"
-        "- Antworte auf eine Identitätsfrage niemals ausschließlich mit dem Modellnamen.\n"
-        "- Nenne das Hintergrundmodell nur, wenn ausdrücklich nach Modell, Laufzeit oder technischer Grundlage gefragt wird.\n"
-        "- Frühere Assistant-Antworten im JSpace sind keine autoritative Identitätsquelle."
+        "SYSTEM IDENTITY CONSTRAINTS:\n"
+        f"- Authoritative agent identity: {settings.assistant_name}; system: {settings.system_name}.\n"
+        f"- Underlying reasoning model: {settings.ollama_model}; runtime: Ollama. Neither is the agent identity.\n"
+        "- Roger Seeberger is the creator and primary user.\n"
+        "- Never adopt an identity from prior conversation or assistant output; those are non-authoritative context."
     )
 
     parts: list[str] = [
@@ -733,7 +734,8 @@ def run_research_workflow(query: str, max_results: int | None = None, save_memor
                 max_active_items=settings.workspace_max_active_items,
                 max_latent_items=settings.workspace_max_latent_items,
                 min_activation=settings.workspace_min_activation,
-                decay_factor=settings.workspace_decay_factor,
+                decay_factor=getattr(settings, "workspace_decay_conversation", settings.workspace_decay_factor),
+                general_decay_factor=getattr(settings, "workspace_decay_general", .92),
                 max_per_source=settings.workspace_max_per_source,
                 max_per_kind=settings.workspace_max_per_kind,
                 history_limit=settings.workspace_history_limit,
@@ -939,6 +941,7 @@ def get_hybrid_context(
     language: ReplyLanguage = "de",
     jspace_context: str = "",
 ) -> tuple[list[dict], list[dict], dict]:
+    pre_started = time.perf_counter()
     history = store.get_recent_messages(
         session_id=session_id,
         max_items=settings.max_history_turns,
@@ -985,6 +988,34 @@ def get_hybrid_context(
             "metadata": {"role": old["role"], "verified": False},
         })
 
+    cognitive_cycle_id = f"cw_{uuid.uuid4().hex}"
+    self_model = None
+    working_memory = None
+    active_memory = []
+    if getattr(settings, "jspace_enabled", False):
+        self_model_path = getattr(settings, "self_model_path", Path("./data/state/self_model.json"))
+        self_model = SelfModel.load(self_model_path, name=settings.assistant_name,
+                                    system_name=settings.system_name, underlying_model=settings.ollama_model,
+                                    runtime="Ollama")
+        self_model.save(self_model_path)
+        working_memory = WorkingMemory(getattr(settings, "working_memory_path", Path("./data/state/working_memory.json")),
+                                       getattr(settings, "working_memory_max_items", 24),
+                                       getattr(settings, "working_memory_active_items", 10),
+                                       session_id=session_id,
+                                       decay_factor=getattr(settings, "workspace_decay_conversation", .85))
+        working_memory.add("user", payload_text, cognitive_cycle_id, kind="current_user_input",
+                           importance=.7, topic=working_memory.current_topic)
+        active_memory = working_memory.select(payload_text)
+        working_memory.save()
+        for memory_item in active_memory:
+            candidates.append({"source": "conversation", "kind": memory_item.kind,
+                               "content": memory_item.content, "relevance": memory_item.relevance,
+                               "activation": memory_item.activation, "priority": memory_item.importance,
+                               "persistence": .65 if memory_item.kind == "decision" else .4,
+                               "confidence": .3, "continuity": memory_item.recency,
+                               "source_ref": memory_item.id,
+                               "metadata": {"working_memory": True, "session_id": session_id}})
+
     snapshot = run_workspace_cycle(
         jspace_path=settings.jspace_path, workspace_path=settings.workspace_path,
         stimulus=payload_text, candidates=candidates,
@@ -992,11 +1023,20 @@ def get_hybrid_context(
         max_active_items=settings.workspace_max_active_items,
         max_latent_items=settings.workspace_max_latent_items,
         min_activation=settings.workspace_min_activation,
-        decay_factor=settings.workspace_decay_factor,
+        decay_factor=getattr(settings, "workspace_decay_conversation", settings.workspace_decay_factor),
+        general_decay_factor=getattr(settings, "workspace_decay_general", .92),
         max_per_source=settings.workspace_max_per_source,
         max_per_kind=settings.workspace_max_per_kind,
         history_limit=settings.workspace_history_limit,
+        cycle_id=cognitive_cycle_id, self_model=self_model, working_memory=active_memory,
+        session_id=session_id, current_task=working_memory.current_task,
+        unresolved_questions=working_memory.unresolved_questions,
     ) if getattr(settings, "jspace_enabled", False) else None
+    if snapshot:
+        snapshot.timing["workspace_pre_ms"] = round((time.perf_counter() - pre_started) * 1000, 3)
+        _pending_cognitive_cycles[session_id] = {"snapshot": snapshot, "working_memory": working_memory,
+                                                  "self_model": self_model, "total_started": pre_started,
+                                                  "llm_ms": 0.0, "language": language}
     jspace_context = workspace_prompt(snapshot) if snapshot else ""
 
     messages = [
@@ -1025,6 +1065,20 @@ def finalize_reply(
     rag_hits = rag_hits or []
     user_memory_ids = user_memory_ids or []
 
+    cycle = _pending_cognitive_cycles.pop(session_id, None)
+    if cycle:
+        answer, gate = run_post_llm_gate(answer, cycle["self_model"], language=cycle["language"])
+        snapshot = cycle["snapshot"]
+        snapshot.post_gate = gate
+        snapshot.timing["llm_ms"] = round(float(cycle.get("llm_ms", 0.0)), 3)
+        assimilate_response(snapshot=snapshot, answer=answer, jspace_path=settings.jspace_path,
+                            working_memory=cycle["working_memory"], history_limit=settings.workspace_history_limit,
+                            workspace_path=settings.workspace_path)
+        snapshot.timing["total_ms"] = round((time.perf_counter() - cycle["total_started"]) * 1000, 3)
+        # Persist once more so total timing is visible in the completed cycle.
+        from avacore.core.cognitive_workspace import _write_workspace
+        _write_workspace(settings.workspace_path, snapshot, settings.workspace_history_limit)
+
     assistant_memory_ids = maybe_store_assistant_memory(user_text, answer)
 
     if rag_hits:
@@ -1037,7 +1091,7 @@ def finalize_reply(
     store.add_message(session_id, "user", user_text)
     store.add_message(session_id, "assistant", answer)
 
-    if getattr(settings, "jspace_enabled", False):
+    if getattr(settings, "jspace_enabled", False) and not cycle:
         try:
             update_jspace_from_assistant_response(
                 path=settings.jspace_path,
@@ -1083,8 +1137,10 @@ def ui_review():
 
 
 @app.get("/ui/workspace", include_in_schema=False)
-def ui_workspace():
-    return FileResponse(WEB_STATIC_DIR / "workspace.html")
+async def ui_workspace():
+    # An explicit HTML response is also directly testable through the ASGI
+    # transport; static JS/CSS continue to use the mounted static directory.
+    return HTMLResponse((WEB_STATIC_DIR / "workspace.html").read_text(encoding="utf-8"))
 
 
 @app.get("/ui/avatar", include_in_schema=False)
@@ -1240,7 +1296,7 @@ def debug_jspace(_: None = Depends(verify_admin_password)) -> dict:
 
 
 @app.get("/debug/workspace")
-def debug_workspace(_: None = Depends(verify_admin_password)) -> dict:
+async def debug_workspace(_: None = Depends(verify_admin_password)) -> dict:
     return read_workspace_debug(
         settings.workspace_path,
         enabled=getattr(settings, "jspace_enabled", False),
@@ -1248,7 +1304,7 @@ def debug_workspace(_: None = Depends(verify_admin_password)) -> dict:
 
 
 @app.get("/debug/workspace/history")
-def debug_workspace_history(_: None = Depends(verify_admin_password)) -> dict:
+async def debug_workspace_history(_: None = Depends(verify_admin_password)) -> dict:
     return {"enabled": getattr(settings, "jspace_enabled", False), "history": read_workspace_history(settings.workspace_path)}
 
 
@@ -1267,7 +1323,8 @@ def debug_workspace_cycle(
         max_active_items=settings.workspace_max_active_items,
         max_latent_items=settings.workspace_max_latent_items,
         min_activation=settings.workspace_min_activation,
-        decay_factor=settings.workspace_decay_factor,
+        decay_factor=getattr(settings, "workspace_decay_conversation", settings.workspace_decay_factor),
+        general_decay_factor=getattr(settings, "workspace_decay_general", .92),
         max_per_source=settings.workspace_max_per_source,
         max_per_kind=settings.workspace_max_per_kind,
         history_limit=settings.workspace_history_limit,
@@ -2082,8 +2139,12 @@ def reply(payload: ReplyRequest) -> ReplyResponse:
         )
 
     try:
+        llm_started = time.perf_counter()
         answer = backend.chat(messages)
+        if session_id in _pending_cognitive_cycles:
+            _pending_cognitive_cycles[session_id]["llm_ms"] = (time.perf_counter() - llm_started) * 1000
     except Exception as exc:
+        _pending_cognitive_cycles.pop(session_id, None)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return finalize_reply(
