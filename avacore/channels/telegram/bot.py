@@ -16,6 +16,8 @@ from avacore.tools.identity_rag import (
 import time
 import os
 import re
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from telegram import Update
 from telegram.ext import (
@@ -38,6 +40,60 @@ from avacore.tools.notes import (
     search_notes,
     update_note_status,
 )
+
+
+@dataclass(frozen=True)
+class CommandSpec:
+    name: str
+    handler: object
+    description: str
+    aliases: tuple[str, ...] = ()
+    requires_llm: bool = False
+    cognitive_visibility: bool = True
+
+
+COMMAND_REGISTRY: dict[str, CommandSpec] = {}
+
+
+def register_commands(specs: list[CommandSpec]) -> dict[str, CommandSpec]:
+    registry: dict[str, CommandSpec] = {}
+    for spec in specs:
+        for name in (spec.name, *spec.aliases):
+            key = name.casefold()
+            if key in registry:
+                raise ValueError(f"duplicate Telegram command or alias: {key}")
+            registry[key] = spec
+    return registry
+
+
+async def _record_command(update: Update, command: str, content: str, cycle_id: str,
+                          *, result: bool = False, status: str = "success") -> None:
+    if not settings.command_events_enabled or not update.effective_chat:
+        return
+    try:
+        await http_client.post(f"{api_base()}/cognitive/command", json={
+            "session_id": f"telegram:{update.effective_chat.id}", "command": command,
+            "content": content, "cycle_id": cycle_id, "result": result, "status": status,
+            "person_id": settings.telegram_person_id,
+        }, headers=admin_headers(), timeout=15)
+    except Exception:
+        # Cognitive observability must not make an otherwise working command
+        # unavailable when the local API is temporarily restarting.
+        return
+
+
+def cognitive_handler(spec: CommandSpec, invoked_name: str):
+    async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        cycle_id = f"cy_{uuid.uuid4().hex}"
+        text = (update.effective_message.text if update.effective_message else None) or f"/{invoked_name}"
+        await _record_command(update, spec.name, text, cycle_id)
+        try:
+            await spec.handler(update, context)
+        except Exception as exc:
+            await _record_command(update, spec.name, f"/{spec.name} failed: {type(exc).__name__}", cycle_id, result=True, status="failed")
+            raise
+        await _record_command(update, spec.name, f"/{spec.name} completed", cycle_id, result=True)
+    return wrapped
 
 
 def api_base() -> str:
@@ -150,6 +206,7 @@ def command_help_text() -> str:
         "/start - Ava starten\n"
         "/help - diese Übersicht\n"
         "/health - AvaCore Status\n"
+        "/status - kompakter Betriebsstatus\n"
         "/model - aktives Modell\n"
         "/de - Antworten auf Deutsch\n"
         "/en - replies in English\n"
@@ -180,6 +237,7 @@ def command_help_text() -> str:
         "/mailscript <dateiname.py> | <scriptinhalt> - Python-Script mailen\n"
         "/mailnote <titel> | <inhalt> - wichtigen Inhalt mailen\n\n"
         "/camera - aktuelles Kamerabild holen\n"        
+        "/see - aktuelle visuelle Wahrnehmung anfordern\n"
         "/snapshot - Alias für /camera\n"
         "/idcapture roger - aktuelles Kamerabild als Roger-Beispiel speichern\n"
         "/idcapture unknown - aktuelles Kamerabild als Nicht-Roger-Beispiel speichern\n"
@@ -196,7 +254,12 @@ def command_help_text() -> str:
         "/noteadd <id> <Text> - Notiz ergänzen\n"
         "/notedone <id> - Notiz als erledigt markieren\n"
         "/notearchive <id> - Notiz archivieren\n"
-        "/notesync - lokale Ava Notes als Markdown exportieren und optional zu Google Drive syncen"
+        "/notesync - lokale Ava Notes als Markdown exportieren und optional zu Google Drive syncen\n\n"
+        "Ava Continuum:\n"
+        "/focus - aktueller Spotlight\n/continuum - Continuum-Zusammenfassung\n"
+        "/workspace - Conscious Workspace\n/memory - aktuelle Working Memory\n"
+        "/persons - registrierte Personen\n/who - aktuell anwesende Person\n"
+        "/why - strukturierte Aktivierungsgründe\n/bsp - installationsspezifische BSP-Aktion"
 
     )
 
@@ -1263,6 +1326,9 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = (update.effective_message.text or "").strip()
     if not text:
         return
+    if text.startswith("/"):
+        await unknown_command(update, context)
+        return
 
     if settings.debug:
         print("TELEGRAM RAW TEXT:", repr(update.effective_message.text))
@@ -1397,6 +1463,22 @@ async def camera_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             scene_image_path = image_path
 
         description = ""
+        perceived_persons = []
+
+        if settings.identity_enabled and settings.person_recognition_enabled:
+            try:
+                identity = recognize_face_image(
+                    image_path=scene_image_path, identity_dir=settings.identity_dir,
+                    model_name=settings.identity_model, device=settings.identity_device,
+                    threshold=settings.person_confidence_threshold,
+                    margin_threshold=settings.identity_margin, top_k=settings.identity_top_k,
+                    min_roger_votes=settings.identity_min_roger_votes,
+                )
+                perceived_persons = [{"track_id": "camera_primary",
+                    "person_id": identity.identity if identity.identity != "unknown" else None,
+                    "confidence": identity.confidence, "location": "camera_view"}]
+            except Exception:
+                perceived_persons = []
 
         try:
             vision_response = await http_client.post(
@@ -1440,6 +1522,17 @@ async def camera_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if description:
             label = "Ava sees" if language == "en" else "Ava sieht"
             caption += f"\n\n{label}:\n{description}"
+
+        # The adapter reports structured perception back into the same
+        # Continuum.  No frame or face embedding is persisted here.
+        await http_client.post(
+            f"{api_base()}/cognitive/perception",
+            json={"session_id": f"telegram:{chat_id}",
+                  "scene_description": description or "Camera snapshot captured",
+                  "persons": perceived_persons, "objects": [], "relations": [],
+                  "confidence": .6 if description else .3},
+            headers=admin_headers(), timeout=15,
+        )
 
         if len(caption) > 1000:
             caption = caption[:1000] + "\n\n[Beschreibung gekürzt]"
@@ -2146,6 +2239,16 @@ async def idcheck_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             min_roger_votes=settings.identity_min_roger_votes,
         )
 
+        await http_client.post(
+            f"{api_base()}/cognitive/perception",
+            json={"session_id": f"telegram:{chat_id}", "scene_description": "Identity check",
+                  "persons": [{"track_id": "camera_primary",
+                    "person_id": decision.identity if decision.identity != "unknown" else None,
+                    "confidence": decision.confidence, "location": "camera_view"}],
+                  "objects": [], "relations": [], "confidence": decision.confidence},
+            headers=admin_headers(), timeout=15,
+        )
+
         caption = "Identity Check:\n\n" + format_identity_decision(decision)
 
         if len(caption) > 1000:
@@ -2160,6 +2263,164 @@ async def idcheck_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.effective_message.reply_text(
             f"Identity Check fehlgeschlagen: {exc}"
         )       
+
+
+async def _debug_json(path: str):
+    return await http_client.get(f"{api_base()}{path}", headers=admin_headers(), timeout=15)
+
+
+async def _request_camera_perception(update: Update, *, reason: str, force: bool,
+                                     include_scene: bool) -> tuple[dict, str | None]:
+    if not update.effective_chat:
+        return {}, "No Telegram chat context."
+    try:
+        response = await http_client.post(f"{api_base()}/perception/camera", json={
+            "reason": reason, "force": force, "include_scene": include_scene,
+            "session_id": f"telegram:{update.effective_chat.id}"},
+            headers=admin_headers(), timeout=240 if include_scene else 120)
+    except Exception as exc:
+        return {}, f"Camera perception failed: {exc}"
+    if not response.ok:
+        try: detail = response.json().get("detail", response.text)
+        except Exception: detail = response.text
+        return {}, str(detail)
+    return response.json(), None
+
+
+async def active_camera_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message: return
+    data, error = await _request_camera_perception(update, reason="see_command", force=True, include_scene=True)
+    if error:
+        await update.effective_message.reply_text(error); return
+    description = clean_camera_description(data.get("scene_description") or "")
+    if description and telegram_reply_language(context) == "de":
+        description = await translate_camera_description_to_german(description)
+    known = data.get("identities_resolved") or []
+    unknown_count = sum(1 for x in data.get("persons", []) if not x.get("person_id"))
+    structured = []
+    if known: structured.append("Recognized: " + ", ".join(known))
+    if unknown_count: structured.append(f"Unknown persons: {unknown_count}")
+    caption = "Aktuelle Ava-Wahrnehmung\n\n" + (description or f"Persons visible: {len(data.get('persons') or [])}")
+    if structured: caption += "\n" + "\n".join(structured)
+    image_path = Path(data.get("image_path") or "")
+    if image_path.exists():
+        with image_path.open("rb") as photo:
+            await update.effective_message.reply_photo(photo=photo, caption=caption[:1000])
+    else:
+        await update.effective_message.reply_text(caption[:4000])
+
+
+async def active_idcheck_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message: return
+    data, error = await _request_camera_perception(update, reason="idcheck", force=True, include_scene=False)
+    if error:
+        await update.effective_message.reply_text(error); return
+    lines = ["Identity Check:", f"persons detected: {len(data.get('persons') or [])}"]
+    for person in data.get("persons") or []:
+        lines.append(f"{person.get('track_id')}: {person.get('person_id') or 'unknown'} ({person.get('confidence',0):.3f})")
+    image_path = Path(data.get("image_path") or "")
+    if image_path.exists():
+        with image_path.open("rb") as photo:
+            await update.effective_message.reply_photo(photo=photo, caption="\n".join(lines)[:1000])
+    else:
+        await update.effective_message.reply_text("\n".join(lines))
+
+
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message:
+        return
+    health, continuum, perception = await _debug_json("/health"), await _debug_json("/debug/continuum"), await _debug_json("/debug/perception")
+    h = health.json() if health.ok else {}; c = continuum.json() if continuum.ok else {}; p = perception.json() if perception.ok else {}
+    present = [x.get("display_name") for x in p.get("persons", []) if x.get("current_presence")]
+    await update.effective_message.reply_text(
+        f"Ava: {'online' if h.get('ok') else 'unavailable'}\nLLM: {'available' if h.get('ok') else 'unavailable'}\n"
+        f"Continuum: {'active' if c.get('enabled') else 'inactive'} ({c.get('entities', 0)} entities)\n"
+        f"Workspace: {c.get('workspace', 0)} items\nVision: {'on' if p.get('enabled') else 'off'}\n"
+        f"Present: {', '.join(present) if present else 'none known'}")
+
+
+async def continuum_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message: return
+    response = await _debug_json("/debug/continuum"); data = response.json() if response.ok else {}
+    await update.effective_message.reply_text(f"Continuum:\nentities: {data.get('entities', 0)}\nactive: {data.get('active', 0)}\nworkspace: {data.get('workspace', 0)}\nvision entities: {data.get('vision_entities', 0)}\npersons active: {data.get('persons_active', 0)}")
+
+
+async def workspace_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message: return
+    response = await _debug_json("/debug/workspace"); data = response.json() if response.ok else {}
+    items = data.get("active_items") or []
+    text = "Conscious Workspace:\n" + ("\n".join(f"{i+1}. {x.get('content','')[:100]}" for i, x in enumerate(items[:8])) or "empty")
+    await update.effective_message.reply_text(text)
+
+
+async def focus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message: return
+    response = await _debug_json("/debug/workspace"); data = response.json() if response.ok else {}
+    items = data.get("active_items") or []
+    await update.effective_message.reply_text("Current focus:\n" + ("\n".join(f"{i+1}. {x.get('content','')[:90]} – {x.get('activation_score', x.get('activation', 0)):.2f}" for i, x in enumerate(items[:5])) or "No active focus."))
+
+
+async def memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message: return
+    response = await _debug_json("/debug/workspace"); data = response.json() if response.ok else {}
+    items = data.get("working_memory") or []
+    await update.effective_message.reply_text("Current Working Memory:\n" + ("\n".join(f"- {x.get('content','')[:120]}" for x in items[-8:]) or "empty"))
+
+
+async def persons_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message: return
+    _, error = await _request_camera_perception(update, reason="persons_command", force=False, include_scene=False)
+    if error and settings.camera_enabled:
+        await update.effective_message.reply_text(error); return
+    response = await _debug_json("/debug/persons"); data = response.json() if response.ok else {}
+    items = data.get("items") or []
+    await update.effective_message.reply_text("Persons:\n" + ("\n".join(f"{x.get('display_name')} – {'present' if x.get('current_presence') else 'not present'} – confidence {x.get('confidence',0):.2f}" for x in items) or "No deliberately registered persons."))
+
+
+async def who_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message: return
+    _, error = await _request_camera_perception(update, reason="who_command", force=False, include_scene=False)
+    if error:
+        await update.effective_message.reply_text(error); return
+    response = await _debug_json("/debug/persons"); items = response.json().get("items", []) if response.ok else []
+    present = [x["display_name"] for x in items if x.get("current_presence") and x.get("confidence", 0) >= settings.person_confidence_threshold]
+    uncertain = [x for x in items if x.get("current_presence") and not x.get("known", True)]
+    if present:
+        answer = f"{', '.join(present)} is currently present."
+    elif len(uncertain) == 1:
+        answer = "One person is currently present, but I do not know who it is."
+    elif uncertain:
+        answer = f"{len(uncertain)} people are present; identities uncertain."
+    else:
+        answer = "No person is currently visible."
+    await update.effective_message.reply_text(answer)
+
+
+async def why_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message: return
+    response = await _debug_json("/debug/workspace"); items = response.json().get("active_items", []) if response.ok else []
+    lines = []
+    labels = {"recency":"recency", "continuity":"conversation/visual continuity", "self_affinity":"self relevance", "relevance":"current relevance", "urgency":"urgency", "confidence":"confidence"}
+    for item in items[:4]:
+        factors = item.get("score_components") or {}
+        reasons = [label for key, label in labels.items() if factors.get(key, 0) >= .5]
+        lines.append(f"{item.get('content','')[:70]}:\n- " + ("\n- ".join(reasons) or item.get("selection_reason", "activation competition")))
+    await update.effective_message.reply_text("Why current focus:\n" + ("\n".join(lines) or "No active focus."))
+
+
+async def bsp_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_message:
+        await update.effective_message.reply_text("BSP ist in dieser Installation nicht konfiguriert.")
+
+
+async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message or not update.effective_chat: return
+    text = update.effective_message.text or "/unknown"
+    name = text.split()[0].lstrip("/").split("@", 1)[0].casefold()
+    cycle_id = f"cy_{uuid.uuid4().hex}"
+    await _record_command(update, name, text, cycle_id)
+    await update.effective_message.reply_text(f"Unbekannter Befehl /{name}. Verwende /help.")
+    await _record_command(update, name, f"Unknown command: /{name}", cycle_id, result=True, status="failed")
 
 
 def build_app(
@@ -2177,65 +2438,40 @@ def build_app(
         builder = builder.get_updates_request(get_updates_request)
     app = builder.build()
 
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("de", de_cmd))
-    app.add_handler(CommandHandler("en", en_cmd))
-    app.add_handler(CommandHandler("health", health_cmd))
-    app.add_handler(CommandHandler("model", model_cmd))
-    app.add_handler(CommandHandler("personality", personality_cmd))
-    app.add_handler(CommandHandler("personalitybackup", personalitybackup_cmd))
-    app.add_handler(CommandHandler("personalityrestore", personalityrestore_cmd))
-
-    app.add_handler(CommandHandler("policies", policies_cmd))
-    app.add_handler(CommandHandler("memories", memories_cmd))
-    app.add_handler(CommandHandler("remember", remember_cmd))
-    app.add_handler(CommandHandler("reset", reset_cmd))
-
-    app.add_handler(CommandHandler("docs", docs_cmd))
-    app.add_handler(CommandHandler("page", page_cmd))
-
-    app.add_handler(CommandHandler("weather", weather_cmd))
-    app.add_handler(CommandHandler("medium", medium_cmd))
-    app.add_handler(CommandHandler("news", news_cmd))
-    app.add_handler(CommandHandler("mediumdigest", mediumdigest_cmd))
-    app.add_handler(CommandHandler("newsdigest", newsdigest_cmd))
-    app.add_handler(CommandHandler("webfetch", webfetch_cmd))
-    app.add_handler(CommandHandler("webask", webask_cmd))
-    app.add_handler(CommandHandler("browsersearch", browser_search_cmd))
-    app.add_handler(CommandHandler("research", research_cmd))
-
-    app.add_handler(CommandHandler("camera", camera_cmd))
-    app.add_handler(CommandHandler("snapshot", camera_cmd))
-
-    # Identity RAG / visual person recognition PoC
-    app.add_handler(CommandHandler("idcapture", idcapture_cmd))
-    app.add_handler(CommandHandler("idtrain", idtrain_cmd))
-    app.add_handler(CommandHandler("idcheck", idcheck_cmd))
-
-    app.add_handler(CommandHandler("mail", mail_cmd))
-    app.add_handler(CommandHandler("maildigest", maildigest_cmd))
-    app.add_handler(CommandHandler("sendmail", sendmail_cmd))
-    app.add_handler(CommandHandler("mailscript", mailscript_cmd))
-    app.add_handler(CommandHandler("mailnote", mailnote_cmd))
-
-    app.add_handler(CommandHandler("briefing", briefing_cmd))
-
-    app.add_handler(CommandHandler("switchon", switch_on_cmd))
-    app.add_handler(CommandHandler("switchoff", switch_off_cmd))
-    app.add_handler(CommandHandler("switchstate", switch_state_cmd))
-
-    app.add_handler(CommandHandler("note", note_cmd))
-    app.add_handler(CommandHandler("notes", notes_cmd))
-    app.add_handler(CommandHandler("notesearch", notesearch_cmd))
-    app.add_handler(CommandHandler("noteadd", noteadd_cmd))
-    app.add_handler(CommandHandler("notedone", notedone_cmd))
-    app.add_handler(CommandHandler("notearchive", notearchive_cmd))
-    app.add_handler(CommandHandler("notesync", notesync_cmd))
+    specs = [
+        CommandSpec("start", start_cmd, "Ava starten"), CommandSpec("help", help_cmd, "Befehle anzeigen"),
+        CommandSpec("de", de_cmd, "Deutsch"), CommandSpec("en", en_cmd, "English"),
+        CommandSpec("health", health_cmd, "AvaCore health"), CommandSpec("status", status_cmd, "Operational status"),
+        CommandSpec("model", model_cmd, "Active model"), CommandSpec("personality", personality_cmd, "Active personality"),
+        CommandSpec("personalitybackup", personalitybackup_cmd, "Backup personality"), CommandSpec("personalityrestore", personalityrestore_cmd, "Restore personality"),
+        CommandSpec("policies", policies_cmd, "Policies"), CommandSpec("memories", memories_cmd, "Long-term memories"),
+        CommandSpec("remember", remember_cmd, "Remember text"), CommandSpec("reset", reset_cmd, "Reset chat"),
+        CommandSpec("docs", docs_cmd, "Documents"), CommandSpec("page", page_cmd, "Explain page", requires_llm=True),
+        CommandSpec("weather", weather_cmd, "Weather"), CommandSpec("medium", medium_cmd, "Medium feed"), CommandSpec("news", news_cmd, "News feed"),
+        CommandSpec("mediumdigest", mediumdigest_cmd, "Medium digest", requires_llm=True), CommandSpec("newsdigest", newsdigest_cmd, "News digest", requires_llm=True),
+        CommandSpec("webfetch", webfetch_cmd, "Fetch URL"), CommandSpec("webask", webask_cmd, "Ask about URL", requires_llm=True),
+        CommandSpec("browsersearch", browser_search_cmd, "Browser search"), CommandSpec("research", research_cmd, "Web research", requires_llm=True),
+        CommandSpec("camera", active_camera_cmd, "Capture and describe camera", aliases=("snapshot", "see"), requires_llm=False),
+        CommandSpec("idcapture", idcapture_cmd, "Register identity sample"), CommandSpec("idtrain", idtrain_cmd, "Build local identity index"), CommandSpec("idcheck", active_idcheck_cmd, "Check local identity"),
+        CommandSpec("mail", mail_cmd, "Recent mail"), CommandSpec("maildigest", maildigest_cmd, "Mail digest", requires_llm=True),
+        CommandSpec("sendmail", sendmail_cmd, "Send mail"), CommandSpec("mailscript", mailscript_cmd, "Mail script"), CommandSpec("mailnote", mailnote_cmd, "Mail note"),
+        CommandSpec("briefing", briefing_cmd, "Calendar briefing"), CommandSpec("switchon", switch_on_cmd, "Switch on"),
+        CommandSpec("switchoff", switch_off_cmd, "Switch off"), CommandSpec("switchstate", switch_state_cmd, "Switch state"),
+        CommandSpec("note", note_cmd, "Create note"), CommandSpec("notes", notes_cmd, "List notes"), CommandSpec("notesearch", notesearch_cmd, "Search notes"),
+        CommandSpec("noteadd", noteadd_cmd, "Append note"), CommandSpec("notedone", notedone_cmd, "Complete note"), CommandSpec("notearchive", notearchive_cmd, "Archive note"), CommandSpec("notesync", notesync_cmd, "Sync notes"),
+        CommandSpec("focus", focus_cmd, "Current Spotlight"), CommandSpec("continuum", continuum_cmd, "Continuum summary"),
+        CommandSpec("workspace", workspace_cmd, "Conscious Workspace"), CommandSpec("memory", memory_cmd, "Working Memory"),
+        CommandSpec("persons", persons_cmd, "Known persons"), CommandSpec("who", who_cmd, "Who is present"), CommandSpec("why", why_cmd, "Activation reasons"),
+        CommandSpec("bsp", bsp_cmd, "Installation-specific BSP action"),
+    ]
+    global COMMAND_REGISTRY
+    COMMAND_REGISTRY = register_commands(specs)
+    for invoked_name, spec in COMMAND_REGISTRY.items():
+        app.add_handler(CommandHandler(invoked_name, cognitive_handler(spec, invoked_name)))
 
     # Message handlers should stay last.
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, voice_message))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
+    app.add_handler(MessageHandler(filters.TEXT, text_message))
 
     return app
 

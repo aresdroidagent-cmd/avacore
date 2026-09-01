@@ -1,8 +1,8 @@
 # AvaCore
 
-AvaCore is a local AI assistant core for Roger Seeberger's workstation and LAN environment. It combines a local Ollama language model, Telegram, FastAPI, document/image RAG, SQLite memory, web research, camera snapshots, calendar briefings and a shared long-term brain.
+AvaCore is a local-first cognitive assistant architecture for Roger Seeberger's workstation and LAN environment. Ava is the agent identity; AvaCore is the cognitive and runtime system. Ollama-hosted language and vision models are workers used by Ava rather than Ava itself.
 
-The Phase 1 Conscious Workspace integrates conversation, identity, verified memory, knowledge retrieval, and research into the existing JSpace cognitive field. A deterministic attention cycle selects a bounded `CONSCIOUS WORKSPACE` for `/reply`; inspect it at `/ui/workspace` or the protected `/debug/workspace` endpoints. See [docs/CONSCIOUS_WORKSPACE_PHASE1.md](docs/CONSCIOUS_WORKSPACE_PHASE1.md). This is an engineering model of cognitive access, not a claim of phenomenological consciousness.
+The Conscious Workspace integrates conversation, actions, identity, perception, verified memory, knowledge retrieval, and research into the Ava Continuum. A deterministic attention cycle selects a bounded active subset for `/reply`; inspect it at `/ui/workspace` or the protected `/debug/workspace` endpoints. This is an engineering model of cognitive access, attention, and continuity—not a claim of phenomenological consciousness.
 
 The goal is not a toy chatbot. AvaCore is intended as a practical local assistant that can help with robotics, computer vision, AI engineering, research, documentation, automation and project continuity over longer periods of time.
 
@@ -31,6 +31,85 @@ Main capabilities:
 - RTSP camera snapshot support
 - private iCal calendar briefing
 - optional IMAP/SMTP mail tools
+
+## Architecture
+
+```text
+                    Ava Continuum
+                         │
+        ┌────────────────┼────────────────┐
+        │                │                │
+   Conversation        Actions        Perception
+        │                │                │
+     Telegram        Commands           Camera
+        │                │                │
+        └────────────────┼────────────────┘
+                         │
+                  Cognitive Entities
+                         │
+                     Relations
+                         │
+                     Activation
+                         │
+                     Spotlight
+                         │
+               Conscious Workspace
+                         │
+                Reasoning / Action
+                         │
+                    Assimilation
+                         │
+                New Continuum State
+```
+
+The **Ava Continuum** is the overall persistent and transient cognitive field. It contains conversations, commands and results, Working Memory, persons, perception, memories, system state, and other cognitive entities and relations.
+
+The **Spotlight** applies deterministic activation and competition to select currently relevant entities and events. The **Conscious Workspace** is only the small currently attended subset of the larger Continuum. **Working Memory** preserves immediate and session-level continuity across messages, actions, and meaningful perceptual changes.
+
+The project terminology has migrated from **J-Space** to **Ava Continuum**. Legacy `JSpace` class names, settings, persisted files, and debug routes remain temporarily as compatibility aliases; AvaCore does not maintain two separate cognitive fields.
+
+## Current development status
+
+### Phase 3.1 – Entity Links ✅
+
+Phase 3.1 is implemented and accepted for continued development. It provides:
+
+- one canonical `PersonEntity` for each deliberately registered known person
+- anonymous `unknown_person:<track>` entities without open-world identification
+- local camera visual tracks with continuity across fresh captures
+- conservative identity resolution from explicit configuration and local enrollment
+- first-class generic relations between entities
+- camera → track → person links and explicit Telegram-session → person links
+- perceptual Working Memory and Continuum assimilation
+- configurable perception freshness and reuse
+- structured local `/who` perception independent of `/idcheck`
+- semantic `/see` scene description kept separate from identity evidence
+- meaningful perception and identity events with stable-observation deduplication
+
+Structured perception covers person detection, tracking, face detection, local face recognition, confidence checks, and identity resolution. Semantic perception produces a natural-language scene description. A semantic vision model cannot establish or override identity; names come only from structured local recognition.
+
+```text
+track:camera_primary:<id>
+        │
+        ├── seen_by ───────→ sensor:camera
+        └── identified_as ─→ person:roger
+
+person:roger
+        │
+        └── present_at ────→ location:camera_view
+```
+
+The relation model is generic and is intended to connect persons, projects, tasks, locations, memories, goals, and questions. Debug state contains no face embeddings.
+
+### Real-camera validation
+
+The current development setup has successfully validated:
+
+- `/who` resolving the enrolled local user through fresh camera perception
+- `/see` producing a scene description while separately attaching the locally recognized identity
+- canonical `person:roger` linking into the Ava Continuum
+
+Real-world simultaneous known/unknown multi-person validation remains to be expanded. Anonymous-person and confidence-boundary behavior is currently covered by unit and integration tests.
 
 ## Validated environment
 
@@ -179,7 +258,7 @@ AVACORE_AUTO_RESEARCH=ask
 # HTTP / Web UI
 AVACORE_HTTP_HOST=0.0.0.0
 AVACORE_HTTP_PORT=8787
-AVACORE_WEB_ADMIN_PASSWORD=change_me_in_lan
+AVACORE_WEB_ADMIN_PASSWORD=<ADMIN_PASSWORD>
 AVACORE_WEB_AVATAR_PATH=./data/knowledge/inbox/images/synthese-bots-15.jpg
 
 # Ollama
@@ -243,6 +322,16 @@ AVACORE_CAMERA_PASSWORD=
 AVACORE_CAMERA_IP=
 AVACORE_CAMERA_RTSP_PATH=/play1.sdp
 AVACORE_CAMERA_CACHE_DIR=./data/cache/camera
+
+# Ava Continuum / active local perception
+AVA_CONTINUUM_ENABLED=1
+AVA_COMMAND_EVENTS_ENABLED=1
+AVA_PERCEPTION_FRESHNESS_SECONDS=3
+AVA_PERCEPTION_TRACK_IOU_THRESHOLD=0.25
+AVA_PERSON_RECOGNITION_ENABLED=1
+AVA_PERSON_CONFIDENCE_THRESHOLD=0.90
+AVA_KNOWN_PERSONS=roger:Roger
+AVA_TELEGRAM_PERSON_ID=roger
 
 # Calendar / daily briefing
 AVACORE_CALENDAR_ICS_URL=
@@ -475,7 +564,7 @@ prompt.
 
 ### Controlled autonomous research
 
-AvaCore can derive research candidates from active JSpace topics and, only in
+AvaCore can derive research candidates from active Ava Continuum topics and, only in
 `bounded` mode, process at most one topic per scheduler call. It reuses the
 existing DuckDuckGo/source reader, local Ollama backend and reviewed
 `memory_items` workflow. Results always remain `candidate` until manually
@@ -501,35 +590,32 @@ budgets, safety boundaries, API examples, Telegram behavior and timer setup.
 Set in `.env`:
 
 ```env
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_ALLOWED_CHAT_ID=...
+TELEGRAM_BOT_TOKEN=<TELEGRAM_BOT_TOKEN>
+TELEGRAM_ALLOWED_CHAT_ID=<PRIVATE_CHAT_ID>
 ```
 
 The bot only accepts messages from the configured private chat.
 
 Common commands:
 
-```text
-/start                         show command overview
-/help                          show available commands
-/de                            switch replies to German
-/en                            switch replies to English
-/health                        runtime status
-/model                         active model and profile
-/reset                         reset Telegram chat history
-/memories                      list stored memories
-/remember <text>               store a manual memory entry
-/docs [keyword]                list indexed documents
-/page <doc> | <page>           explain a specific document page
-/camera or /snapshot           request current camera image
-/briefing                      today's calendar briefing
-/research <question>           web research with sources and memory candidate
-/webfetch <url>                fetch readable page text
-/webask <url> <question>       ask a question about a specific webpage
-/mail                          recent inbox entries
-/maildigest                    summarize recent emails
-/sendmail <subject> | <body>   send mail to configured default recipient
-```
+| Command | Purpose | LLM use |
+|---|---|---|
+| `/help` | Show the registered command overview | None |
+| `/status` | Compact operational and perception status | None |
+| `/bsp` | Installation-specific BSP action/status | None |
+| `/focus` | Current Spotlight items and real activation values | None |
+| `/workspace` | Compact Conscious Workspace | None |
+| `/continuum` | Compact Ava Continuum diagnostics | None |
+| `/memory` | Current/session Working Memory | None |
+| `/camera`, `/snapshot`, `/see` | Force structured perception and describe the current scene | One local semantic vision call; German output may use the existing translation path |
+| `/idcheck` | Force structured camera identity perception and show diagnostics | None |
+| `/persons` | Canonical known and currently tracked persons, refreshing stale perception | None |
+| `/who` | Answer who is visible using fresh/recent structured local perception | None |
+| `/why` | Structured activation factors, never hidden chain-of-thought | None |
+
+Other existing commands remain available for language selection, model and health diagnostics, memory, documents, research, mail, calendar, browser control, switches, notes, personality, and local identity enrollment. `/help` is the authoritative runtime inventory.
+
+`/who` does not require `/idcheck`: it reuses sufficiently fresh structured perception or requests one fresh camera cycle. `/idcheck` is a forced diagnostic cycle. `/see` forces current structured perception and may additionally invoke the local semantic vision worker for scene description.
 
 The Telegram language selection is stored per chat for the current bot runtime
 and applies to text messages, transcribed voice messages and camera output. After
@@ -540,6 +626,64 @@ Free text messages are forwarded to `/reply` with the selected language and can
 use chat history, verified memories, RAG context, policies, personality and the
 active Ollama model.
 
+### Phase 3.1 performance
+
+```text
+Fresh /who
+→ reuse recent structured perception
+→ no capture, semantic VLM, or reasoning LLM
+
+Stale /who
+→ one camera capture and local structured perception
+→ no semantic VLM or reasoning LLM
+
+/persons
+→ the same freshness policy
+→ no reasoning LLM
+
+/idcheck
+→ one forced structured perception cycle
+→ no scene-description LLM
+
+/see
+→ one forced structured perception cycle
+→ one local semantic vision call
+→ German output may additionally use the existing single translation reply call
+
+normal /reply fast path
+→ at most one reasoning/chat backend call
+```
+
+### Continuum debug endpoints
+
+The following protected endpoints expose real cognitive state:
+
+```text
+GET /debug/continuum
+GET /debug/continuum/history
+GET /debug/workspace
+GET /debug/workspace/history
+GET /debug/entities
+GET /debug/entities/{id}
+GET /debug/relations
+GET /debug/persons
+GET /debug/perception
+GET /debug/commands
+```
+
+Use an environment variable rather than placing the admin password in shell history or documentation:
+
+```bash
+export AVA="http://127.0.0.1:8787"
+export AVA_ADMIN_PASSWORD="<ADMIN_PASSWORD>"
+
+curl -s \
+  -H "X-Admin-Password: $AVA_ADMIN_PASSWORD" \
+  "$AVA/debug/persons" | jq
+```
+
+Perception diagnostics include capture/perception timestamps, freshness, detected-person count, active tracks, bounding boxes, face-detection and recognition status, candidate/confidence, and resolved identity. They never include biometric embeddings.
+
 ## Web research
 
 AvaCore has two web information paths.
@@ -549,7 +693,7 @@ Direct webpage question:
 ```bash
 curl -X POST http://127.0.0.1:8787/tools/web_ask \
   -H "Content-Type: application/json" \
-  -H "X-Admin-Password: YOUR_PASSWORD" \
+  -H "X-Admin-Password: $AVA_ADMIN_PASSWORD" \
   -d '{"url":"https://example.com","question":"What is on this page?"}'
 ```
 
@@ -558,7 +702,7 @@ Research workflow:
 ```bash
 curl -X POST http://127.0.0.1:8787/research \
   -H "Content-Type: application/json" \
-  -H "X-Admin-Password: YOUR_PASSWORD" \
+  -H "X-Admin-Password: $AVA_ADMIN_PASSWORD" \
   -d '{
     "query": "D-Link DCS-5222L RTSP play1.sdp",
     "max_results": 4,
@@ -591,7 +735,7 @@ Debug endpoint:
 ```bash
 curl -X POST http://127.0.0.1:8787/debug/decision \
   -H "Content-Type: application/json" \
-  -H "X-Admin-Password: YOUR_PASSWORD" \
+  -H "X-Admin-Password: $AVA_ADMIN_PASSWORD" \
   -d '{"text":"Welche OpenCV Version ist aktuell stabil?"}'
 ```
 
@@ -630,17 +774,17 @@ Examples:
 ```bash
 curl -X POST http://127.0.0.1:8787/browser/search \
   -H "Content-Type: application/json" \
-  -H "X-Admin-Password: YOUR_PASSWORD" \
+  -H "X-Admin-Password: $AVA_ADMIN_PASSWORD" \
   -d '{"query":"D-Link DCS-5222L RTSP play1.sdp"}'
 
 curl -X POST http://127.0.0.1:8787/browser/text \
   -H "Content-Type: application/json" \
-  -H "X-Admin-Password: YOUR_PASSWORD" \
+  -H "X-Admin-Password: $AVA_ADMIN_PASSWORD" \
   -d '{"max_chars":4000}'
 
 curl -X POST http://127.0.0.1:8787/browser/screenshot \
   -H "Content-Type: application/json" \
-  -H "X-Admin-Password: YOUR_PASSWORD" \
+  -H "X-Admin-Password: $AVA_ADMIN_PASSWORD" \
   -d '{"full_page":true}'
 ```
 
@@ -736,7 +880,7 @@ API:
 ```bash
 curl -X POST http://127.0.0.1:8787/briefing/calendar \
   -H "Content-Type: application/json" \
-  -H "X-Admin-Password: YOUR_PASSWORD" \
+  -H "X-Admin-Password: $AVA_ADMIN_PASSWORD" \
   -d '{}'
 ```
 
@@ -1441,66 +1585,23 @@ Check the next run:
 systemctl --user list-timers --all | grep avacore-mail-digest
 ```
 
-## Dynamic Conscious Workspace / JSpace
+## Ava Continuum compatibility and safety
 
-AvaCore includes a first minimal implementation of the Dynamic Conscious Workspace, called **JSpace**.
+The Ava Continuum is the preferred name for the dynamic cognitive field formerly documented as J-Space. Existing deployments can continue using `AVACORE_JSPACE_*`, persisted `jspace.json`, `/debug/jspace`, and legacy Python aliases while migration proceeds. These names all refer to the same cognitive system.
 
-JSpace is not a separate memory and not a separate intelligence. It is a dynamic activation field that represents Ava's current cognitive focus across the larger AvaCore context.
+Runtime Continuum, Working Memory, perception, person, relation, and history files live below `data/state/` and must not be committed. Local identity enrollment and embeddings live below `data/vision_identity/` and must also remain private.
 
-The current Phase 1 implementation is intentionally conservative:
+The Continuum may influence activation and focus, but it must not silently rewrite durable identity, goals, or verified long-term memory. Durable memory continues to follow the reviewed workflow:
 
-- JSON-based state storage
-- no autonomous background process
-- no direct modification of verified long-term memory
-- no permanent identity or goal changes without Roger's review
-- injection of the current top activated JSpace items into the `/reply` 
-
-system prompt
-- debug visibility through `/debug/jspace`
-
-This file is private runtime state and must not be committed.
-
-Configuration:
-
-AVACORE_JSPACE_ENABLED=1
-AVACORE_JSPACE_PATH=./data/state/jspace.json
-AVACORE_JSPACE_TOP_K=8
-AVACORE_JSPACE_DECAY=0.92
-AVACORE_JSPACE_MIN_ACTIVATION=0.05
-AVACORE_JSPACE_FOCUS_MODE=balanced
-
-Available focus modes for Phase 1:
-
-balanced
-narrow
-wide
-watchful
-
-The JSpace is updated during normal /reply calls:
-
-user message
-→ JSpace tick / decay
-→ user signal activation
-→ top active JSpace items
-→ system prompt injection
-→ model response
-→ assistant response activation
-
-Debug endpoint:
-
-curl -s http://127.0.0.1:8787/debug/jspace \\
-  -H "X-Admin-Password: YOUR_ADMIN_PASSWORD" | jq
-
-The architecture document is stored in:
-
-docs/JSPACE.md
-
-Safety boundary:
-
-JSpace may influence focus.
-JSpace may suggest what appears relevant.
-JSpace must not silently rewrite durable identity, goals or verified long-term memory.
-
-Durable memory still follows AvaCore's reviewed memory workflow:
-
+```text
 candidate → verified → usable as trusted long-term context
+```
+
+The historical design documents remain available in [docs/JSPACE.md](docs/JSPACE.md), [docs/CONSCIOUS_WORKSPACE_PHASE1.md](docs/CONSCIOUS_WORKSPACE_PHASE1.md), and [docs/JSPACE_PHASE2_COGNITIVE_CONTINUITY.md](docs/JSPACE_PHASE2_COGNITIVE_CONTINUITY.md).
+
+## Roadmap
+
+- **Phase 3.1 – Entity Links:** implemented and accepted for continued development.
+- **Phase 4 – Cognitive Orbits + Task Drive:** next. Persistent unresolved topics retain bounded baseline activation and may later create bounded `CognitiveTask` candidates. This is not implemented yet.
+- **Phase 5 – Model Router:** planned. Ava will select configured local workers for dialogue, reasoning, vision, coding, and review without equating the agent with any one model.
+- **Phase 6 – Self Development Lab:** planned. Ava may run bounded code experiments in isolated Git worktrees and produce tested `PatchProposal`s, but may not automatically overwrite, merge into, push, or restart production.

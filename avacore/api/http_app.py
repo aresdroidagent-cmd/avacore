@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from dataclasses import asdict
 from contextlib import asynccontextmanager
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -46,6 +47,7 @@ from avacore.tools.web_research import (
 )
 from avacore.mail.service import MailService
 from avacore.vision.describe import describe_image_with_smolvlm, detect_image_mode
+from avacore.vision.perception import CameraPerceptionService
 from avacore.system.ollama_runtime import start_ollama_server
 from avacore.core.jspace import (
     clamp,
@@ -63,6 +65,7 @@ from avacore.core.cognitive_workspace import (
     run_post_llm_gate,
     workspace_prompt,
 )
+from avacore.core.continuum import ContinuumService, VisualObservation
 
 _ollama_process = None
 _pending_cognitive_cycles: dict[str, dict] = {}
@@ -71,6 +74,20 @@ _pending_cognitive_cycles: dict[str, dict] = {}
 # Static web files now live in avacore/web/static.
 WEB_STATIC_DIR = Path(__file__).resolve().parents[1] / "web" / "static"
 AVA_AVATAR_PATH = settings.web_avatar_path
+
+
+def continuum_service() -> ContinuumService:
+    return ContinuumService(
+        settings.jspace_path, settings.workspace_path, settings.working_memory_path,
+        settings.continuum_history_path, settings.persons_path,
+        confidence_threshold=settings.person_confidence_threshold,
+        event_cooldown=settings.vision_event_cooldown,
+        known_persons=settings.known_persons,
+    )
+
+
+def camera_perception_service() -> CameraPerceptionService:
+    return CameraPerceptionService(settings, continuum_service())
 
 
 # -----------------------------------------------------------------------------
@@ -225,6 +242,32 @@ class ReplyResponse(BaseModel):
 class WorkspaceCycleDebugRequest(BaseModel):
     text: str
     attention_mode: str = "focused"
+
+
+class CommandEventRequest(BaseModel):
+    session_id: str
+    command: str
+    content: str
+    cycle_id: str | None = None
+    status: str | None = None
+    result: bool = False
+    person_id: str | None = None
+
+
+class PerceptionEventRequest(BaseModel):
+    session_id: str = "vision"
+    scene_description: str = ""
+    persons: list[dict] = []
+    objects: list[str] = []
+    relations: list[dict] = []
+    confidence: float = .5
+
+
+class CameraPerceptionRequest(BaseModel):
+    reason: str = "api_request"
+    force: bool = False
+    include_scene: bool = False
+    session_id: str = "perception:camera"
 
 
 class ResetRequest(BaseModel):
@@ -1293,6 +1336,87 @@ def debug_jspace(_: None = Depends(verify_admin_password)) -> dict:
         "enabled": True,
         "state": state,
     }
+
+
+@app.get("/debug/continuum")
+def debug_continuum(_: None = Depends(verify_admin_password)) -> dict:
+    return continuum_service().summary()
+
+
+@app.get("/debug/continuum/history")
+def debug_continuum_history(_: None = Depends(verify_admin_password)) -> dict:
+    return {"events": continuum_service().events()}
+
+
+@app.get("/debug/commands")
+def debug_commands(_: None = Depends(verify_admin_password)) -> dict:
+    events = continuum_service().events()
+    return {"items": [{"timestamp": x["timestamp"], "command": x.get("metadata", {}).get("command"),
+        "source": x["source"], "status": x.get("metadata", {}).get("status"),
+        "cycle_id": x["cycle_id"]} for x in events if x["kind"] in {"user_command", "command_result"}]}
+
+
+@app.get("/debug/persons")
+def debug_persons(_: None = Depends(verify_admin_password)) -> dict:
+    return {"items": [vars(x) for x in continuum_service().persons().values()]}
+
+
+@app.get("/debug/entities")
+def debug_entities(_: None = Depends(verify_admin_password)) -> dict:
+    return {"items": continuum_service().entities()}
+
+
+@app.get("/debug/entities/{entity_id:path}")
+def debug_entity(entity_id: str, _: None = Depends(verify_admin_password)) -> dict:
+    entity = next((x for x in continuum_service().entities() if x["id"] == entity_id), None)
+    if entity is None:
+        raise HTTPException(status_code=404, detail="entity not found")
+    links = [asdict(x) for x in continuum_service().relations()
+             if entity_id in {x.subject_id, x.object_id}]
+    return {"entity": entity, "relations": links}
+
+
+@app.get("/debug/relations")
+def debug_relations(_: None = Depends(verify_admin_password)) -> dict:
+    return {"items": [asdict(x) for x in continuum_service().relations()]}
+
+
+@app.get("/debug/perception")
+def debug_perception(_: None = Depends(verify_admin_password)) -> dict:
+    data = continuum_service()._read(settings.persons_path, {})
+    return {"enabled": settings.camera_enabled, "camera_enabled": settings.camera_enabled,
+            **camera_perception_service().state(), "last_observation": data.get("last_observation"),
+            "persons": [vars(x) for x in continuum_service().persons().values()]}
+
+
+@app.post("/cognitive/command")
+def cognitive_command(payload: CommandEventRequest, _: None = Depends(verify_admin_password)) -> dict:
+    service = continuum_service()
+    event = (service.command_result(session_id=payload.session_id, command=payload.command,
+             content=payload.content, cycle_id=payload.cycle_id or "missing-cycle",
+             status=payload.status or "success") if payload.result else
+             service.command(session_id=payload.session_id, command=payload.command,
+             content=payload.content, cycle_id=payload.cycle_id, person_id=payload.person_id))
+    return vars(event)
+
+
+@app.post("/cognitive/perception")
+def cognitive_perception(payload: PerceptionEventRequest, _: None = Depends(verify_admin_password)) -> dict:
+    observation = VisualObservation(payload.scene_description, payload.persons, payload.objects,
+                                    payload.relations, payload.confidence)
+    return {"events": [vars(x) for x in continuum_service().observe(observation, session_id=payload.session_id)]}
+
+
+@app.post("/perception/camera")
+def request_camera_perception(payload: CameraPerceptionRequest,
+                              _: None = Depends(verify_admin_password)) -> dict:
+    try:
+        return asdict(camera_perception_service().request(reason=payload.reason, force=payload.force,
+            include_scene=payload.include_scene, session_id=payload.session_id))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"camera perception failed: {exc}") from exc
 
 
 @app.get("/debug/workspace")

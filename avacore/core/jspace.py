@@ -508,6 +508,14 @@ class JSpaceState:
         }
 
 
+# Phase 3 preferred terminology.  These are aliases, deliberately not a second
+# cognitive store: existing persisted J-Space data and callers remain valid.
+CognitiveEntity = JSpaceItem
+ContinuumState = JSpaceState
+Continuum = JSpaceState
+JSpace = Continuum
+
+
 def update_jspace_from_user_message(
     path: Path | str,
     text: str,

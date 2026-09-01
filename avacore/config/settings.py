@@ -340,6 +340,10 @@ class Settings:
             "yes",
             "on",
         }
+        self.continuum_enabled = os.environ.get(
+            "AVA_CONTINUUM_ENABLED", os.environ.get("AVACORE_JSPACE_ENABLED", "0")
+        ).strip() in {"1", "true", "True", "yes", "on"}
+        self.command_events_enabled = os.environ.get("AVA_COMMAND_EVENTS_ENABLED", "1").strip() not in {"0", "false", "False"}
 
         self.jspace_path = Path(
             os.environ.get("AVACORE_JSPACE_PATH", "./data/state/jspace.json")
@@ -372,6 +376,25 @@ class Settings:
         self.workspace_max_per_source = bounded_int("AVACORE_WORKSPACE_MAX_PER_SOURCE", 4, 1, 16)
         self.workspace_max_per_kind = bounded_int("AVACORE_WORKSPACE_MAX_PER_KIND", 4, 1, 16)
         self.working_memory_path = Path(os.environ.get("AVACORE_WORKING_MEMORY_PATH", "./data/state/working_memory.json")).expanduser()
+        self.continuum_history_path = Path(os.environ.get("AVA_CONTINUUM_HISTORY_PATH", "./data/state/continuum_history.json")).expanduser()
+        self.persons_path = Path(os.environ.get("AVA_PERSONS_PATH", "./data/state/persons.json")).expanduser()
+        self.vision_poll_interval = bounded_float("AVA_VISION_POLL_INTERVAL", 10.0, 1.0, 3600.0)
+        self.vision_event_cooldown = bounded_float("AVA_VISION_EVENT_COOLDOWN", 10.0, 0.0, 3600.0)
+        self.perception_freshness_seconds = bounded_float("AVA_PERCEPTION_FRESHNESS_SECONDS", 3.0, 0.0, 300.0)
+        self.perception_track_iou_threshold = bounded_float("AVA_PERCEPTION_TRACK_IOU_THRESHOLD", 0.25, 0.0, 1.0)
+        self.person_recognition_enabled = os.environ.get(
+            "AVA_PERSON_RECOGNITION_ENABLED", "1" if self.identity_enabled else "0"
+        ).strip() in {"1", "true", "True", "yes", "on"}
+        self.person_confidence_threshold = bounded_float("AVA_PERSON_CONFIDENCE_THRESHOLD", self.identity_threshold, 0.0, 1.0)
+        self.known_persons = {}
+        for entry in split_csv(os.environ.get("AVA_KNOWN_PERSONS", "")):
+            person_id, _, display_name = entry.partition(":")
+            if person_id.strip():
+                self.known_persons[person_id.strip()] = display_name.strip() or person_id.strip()
+        if self.identity_enabled:
+            # The existing local enrollment tool has one deliberate known label.
+            self.known_persons.setdefault("roger", "Roger")
+        self.telegram_person_id = os.environ.get("AVA_TELEGRAM_PERSON_ID", "").strip() or None
         self.self_model_path = Path(os.environ.get("AVACORE_SELF_MODEL_PATH", "./data/state/self_model.json")).expanduser()
         self.working_memory_max_items = bounded_int("AVACORE_WORKING_MEMORY_MAX_ITEMS", 24, 8, 100)
         self.working_memory_active_items = bounded_int("AVACORE_WORKING_MEMORY_ACTIVE_ITEMS", 10, 2, 32)

@@ -34,3 +34,17 @@ def test_invalid_auto_research_mode_is_rejected(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="off, ask, bounded"):
         Settings()
+
+
+def test_person_recognition_follows_existing_identity_switch_by_default(monkeypatch) -> None:
+    monkeypatch.setenv("AVACORE_IDENTITY_ENABLED", "1")
+    monkeypatch.delenv("AVA_PERSON_RECOGNITION_ENABLED", raising=False)
+    configured = Settings()
+    assert configured.person_recognition_enabled is True
+    assert configured.known_persons["roger"] == "Roger"
+
+
+def test_person_recognition_can_still_be_explicitly_disabled(monkeypatch) -> None:
+    monkeypatch.setenv("AVACORE_IDENTITY_ENABLED", "1")
+    monkeypatch.setenv("AVA_PERSON_RECOGNITION_ENABLED", "0")
+    assert Settings().person_recognition_enabled is False
