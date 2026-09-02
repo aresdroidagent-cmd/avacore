@@ -213,6 +213,8 @@ def test_normal_reply_fast_path_has_exactly_one_reasoning_call(monkeypatch, tmp_
     response = _run_reply(http_app, "Erkläre den lokalen Scheduler kurz.", chat_id="fast")
     assert "normale Antwort" in response.reply
     assert chat.call_count == 1
+    assert http_app.model_router.last_decision.task_type == "dialogue.reply"
+    assert http_app.model_router.last_decision.worker_id == "ollama_reasoning"
     debug = json.loads((tmp_path / "workspace.json").read_text())["current"]
     assert set(debug["timing"]) >= {"workspace_pre_ms", "llm_ms", "workspace_post_ms", "total_ms"}
 

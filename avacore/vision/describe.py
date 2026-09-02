@@ -23,6 +23,11 @@ _client_lock = threading.Lock()
 _logger = logging.getLogger(__name__)
 
 
+def vision_worker_loaded() -> bool:
+    """Read-only residency signal; never initializes the vision client."""
+    return _client is not None
+
+
 SCREEN_UI_PROMPT = (
     "Beschreibe dieses Bild als Screenshot, textlastige Oberfläche oder Folie. "
     "Nenne kurz die Art der Oberfläche, sichtbare Titel, wichtige Texte, Meldungen "

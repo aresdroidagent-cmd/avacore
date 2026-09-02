@@ -31,6 +31,15 @@ from avacore.core.autonomous_research import AutonomousResearchService
 from avacore.memory.sqlite_store import SQLiteStore
 from avacore.memory.auto_memory import AutoMemoryExtractor
 from avacore.model.ollama_backend import OllamaBackend
+from avacore.model.router import (
+    ModelCapability,
+    ModelRouter,
+    ResourceSnapshot,
+    RouteDecision,
+    TaskProfile,
+    default_workers,
+    profile_for_operation,
+)
 from avacore.policy.engine import PolicyEngine
 from avacore.rag.embedder import Embedder
 from avacore.rag.retriever import Retriever
@@ -46,9 +55,15 @@ from avacore.tools.web_research import (
     serialize_sources,
 )
 from avacore.mail.service import MailService
-from avacore.vision.describe import describe_image_with_smolvlm, detect_image_mode
+from avacore.vision.describe import describe_image_with_smolvlm, detect_image_mode, vision_worker_loaded
 from avacore.vision.perception import CameraPerceptionService
-from avacore.system.ollama_runtime import start_ollama_server, unload_ollama_model
+from avacore.system.ollama_runtime import loaded_ollama_models, start_ollama_server, unload_ollama_model
+from avacore.model.resources import (
+    NvidiaSmiProvider,
+    ResourceCoordinator,
+    RuntimeResourceProvider,
+    default_resource_profiles,
+)
 from avacore.core.jspace import (
     clamp,
     read_jspace_debug,
@@ -92,14 +107,10 @@ def orbit_store() -> OrbitStore:
     return OrbitStore(settings.orbit_path)
 
 
-def camera_perception_service() -> CameraPerceptionService:
-    preflight = None
-    if settings.vision_preempt_reasoning:
-        preflight = lambda: unload_ollama_model(
-            settings.ollama_model, settings.ollama_url,
-            timeout=min(10.0, settings.ollama_timeout_ms / 1000.0),
-        )
-    return CameraPerceptionService(settings, continuum_service(), vision_preflight=preflight)
+def camera_perception_service(route_decision=None) -> CameraPerceptionService:
+    vision_lease = ((lambda: resource_coordinator.lease(route_decision))
+                    if route_decision is not None else None)
+    return CameraPerceptionService(settings, continuum_service(), vision_lease=vision_lease)
 
 
 # -----------------------------------------------------------------------------
@@ -200,6 +211,28 @@ backend = OllamaBackend(
     model=settings.ollama_model,
     timeout_ms=settings.ollama_timeout_ms,
 )
+model_router = ModelRouter(
+    default_workers(settings), enabled=settings.model_router_enabled,
+    history_limit=settings.model_router_history_limit,
+)
+runtime_resource_provider = RuntimeResourceProvider(
+    NvidiaSmiProvider(timeout=settings.gpu_query_timeout_seconds),
+    ollama_model=settings.ollama_model,
+    ollama_probe=lambda: loaded_ollama_models(
+        settings.ollama_url, timeout=settings.gpu_query_timeout_seconds),
+    vision_probe=vision_worker_loaded,
+)
+resource_coordinator = ResourceCoordinator(
+    default_resource_profiles(
+        preempt_reasoning_for_vision=settings.vision_preempt_reasoning),
+    snapshot_provider=runtime_resource_provider,
+    release_adapters={"ollama_reasoning":lambda: unload_ollama_model(
+        settings.ollama_model, settings.ollama_url,
+        timeout=min(10.0, settings.ollama_timeout_ms / 1000.0))},
+    enabled=settings.resource_coordinator_enabled,
+    history_limit=settings.resource_history_limit,
+)
+model_router.resource_provider = resource_coordinator.snapshot
 
 
 def autonomous_research_service() -> AutonomousResearchService:
@@ -302,6 +335,20 @@ class QuestionCandidateRequest(BaseModel):
     question: str
     importance: float = .5
     reason: str
+
+
+class ModelRouteRequest(BaseModel):
+    task_type: str
+    required_capability: str | None = None
+    requires_model: bool = True
+    latency_class: str = "interactive"
+    risk_level: str = "low"
+    active_workers: list[str] = []
+
+
+class ResourcePlanRequest(BaseModel):
+    worker_id: str | None = None
+    active_workers: list[str] = []
 
 
 class ResetRequest(BaseModel):
@@ -1440,6 +1487,59 @@ def debug_questions(_: None = Depends(verify_admin_password)) -> dict:
             "items":[asdict(x) for x in orbit_store().questions()]}
 
 
+@app.get("/debug/model-router")
+def debug_model_router(_: None = Depends(verify_admin_password)) -> dict:
+    state = model_router.debug_state()
+    state["resource_state"] = asdict(resource_coordinator.snapshot())
+    plan = resource_coordinator.last_plan
+    if (state.get("last_decision") and plan and
+            plan.worker_id == state["last_decision"].get("worker_id")):
+        state["last_decision"]["resource_actions"] = [x.label for x in plan.actions]
+    return state
+
+
+@app.post("/debug/model-router/route")
+def debug_model_route(payload: ModelRouteRequest,
+                      _: None = Depends(verify_admin_password)) -> dict:
+    try:
+        capability = (ModelCapability(payload.required_capability.casefold())
+                      if payload.required_capability else None)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="unknown model capability") from exc
+    profile = TaskProfile(payload.task_type,
+        required_capabilities=(capability,) if capability else (),
+        preferred_capability=capability, requires_model=payload.requires_model,
+        latency_class=payload.latency_class, risk_level=payload.risk_level,
+        metadata={"reason":"explicit diagnostic route request"})
+    decision = model_router.route(profile,
+        ResourceSnapshot(active_workers=tuple(payload.active_workers)))
+    plan = resource_coordinator.plan(decision,
+        ResourceSnapshot(active_workers=tuple(payload.active_workers)))
+    return {**asdict(decision),
+            "resource_actions":[action.label for action in plan.actions],
+            "resource_plan":asdict(plan)}
+
+
+@app.get("/debug/resources")
+def debug_resources(_: None = Depends(verify_admin_password)) -> dict:
+    return resource_coordinator.debug_state()
+
+
+@app.post("/debug/resources/plan")
+def debug_resource_plan(payload: ResourcePlanRequest,
+                        _: None = Depends(verify_admin_password)) -> dict:
+    worker = next((item for item in model_router.workers
+                   if item.worker_id == payload.worker_id), None)
+    if payload.worker_id and worker is None:
+        raise HTTPException(status_code=400, detail="unknown worker")
+    decision = RouteDecision("diagnostic.resource-plan", bool(worker), None,
+        worker.worker_id if worker else None, worker.model_name if worker else None,
+        worker.runtime if worker else None, "diagnostic resource plan")
+    plan = resource_coordinator.plan(decision,
+        ResourceSnapshot(active_workers=tuple(payload.active_workers)))
+    return asdict(plan)
+
+
 @app.post("/orbits")
 def create_orbit(payload: OrbitCreateRequest, _: None = Depends(verify_admin_password)) -> dict:
     orbit = orbit_store().create_orbit(payload.title, payload.description,
@@ -1520,7 +1620,11 @@ def cognitive_perception(payload: PerceptionEventRequest, _: None = Depends(veri
 def request_camera_perception(payload: CameraPerceptionRequest,
                               _: None = Depends(verify_admin_password)) -> dict:
     try:
-        return asdict(camera_perception_service().request(reason=payload.reason, force=payload.force,
+        operation = "vision.camera" if payload.include_scene else (
+            "telegram:/idcheck" if payload.reason == "idcheck" else "telegram:/who"
+        )
+        route_decision = model_router.route(profile_for_operation(operation))
+        return asdict(camera_perception_service(route_decision).request(reason=payload.reason, force=payload.force,
             include_scene=payload.include_scene, session_id=payload.session_id,
             scene_language=payload.scene_language))
     except RuntimeError as exc:
@@ -2375,7 +2479,9 @@ def reply(payload: ReplyRequest) -> ReplyResponse:
 
     try:
         llm_started = time.perf_counter()
-        answer = backend.chat(messages)
+        route_decision = model_router.route(profile_for_operation("dialogue.reply"))
+        with resource_coordinator.lease(route_decision):
+            answer = backend.chat(messages)
         if session_id in _pending_cognitive_cycles:
             _pending_cognitive_cycles[session_id]["llm_ms"] = (time.perf_counter() - llm_started) * 1000
     except Exception as exc:

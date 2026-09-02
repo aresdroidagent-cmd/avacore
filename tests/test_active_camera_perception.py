@@ -1,4 +1,5 @@
 from pathlib import Path
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -74,6 +75,27 @@ def test_semantic_perception_preempts_before_vlm(tmp_path):
     )
     service.request(reason="see_command", force=True, include_scene=True)
     assert order == ["unload", "vlm"]
+
+
+def test_semantic_vlm_runs_inside_resource_lease(tmp_path):
+    order = []
+
+    @contextmanager
+    def lease():
+        order.append("lease-enter")
+        try:
+            yield
+        finally:
+            order.append("lease-exit")
+
+    service = CameraPerceptionService(
+        configuration(tmp_path), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: [],
+        recognizer=lambda **_: None, vision_lease=lease,
+        describer=lambda *_a, **_k: (order.append("vlm") or "empty room"),
+    )
+    service.request(reason="see_command", force=True, include_scene=True)
+    assert order == ["lease-enter", "vlm", "lease-exit"]
 
 
 def test_structured_perception_does_not_preempt_or_call_vlm(tmp_path):

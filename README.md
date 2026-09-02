@@ -169,6 +169,75 @@ have duplicate prevention, `already_asked`, and `delivery_enabled` state. A futu
 interaction-window policy is represented in configuration, but automatic delivery
 and automatic Telegram questions remain disabled.
 
+### Phase 5.0 – Model Router Foundation ✅
+
+Phase 5.0 introduces a small deterministic Model Router. Ava remains the agent;
+Gemma, SmolVLM, and future models are capability-specific workers. Routing itself
+makes zero LLM and network calls and never executes a worker or resource action.
+
+`TaskProfile` describes whether an operation needs a model and its required and
+preferred capability, latency class, risk, and metadata. `RouteDecision` records
+the selected worker, runtime and configured model name, the deterministic reason,
+any proposed resource actions, and whether a fallback was used. `ResourceSnapshot`
+provides an injectable, mockable view of GPU availability, memory, and active
+workers; tests do not require NVIDIA hardware.
+
+The current settings-driven registry contains:
+
+| Worker | Runtime | Capabilities | State |
+|---|---|---|---|
+| `ollama_reasoning` | Ollama, configured by `OLLAMA_MODEL` | dialogue, reasoning | enabled |
+| `smolvlm_vision` | Transformers, configured by `AVACORE_VISION_MODEL` | vision | follows vision configuration |
+| `coding_placeholder` | unconfigured | coding | disabled |
+| `review_placeholder` | unconfigured | review | disabled |
+
+Explicit deterministic operations such as `/who`, `/idcheck`, `/orbits`, `/tasks`,
+`/questions`, `/focus`, and `/workspace` route to no worker. `/see` routes only to
+the vision worker, never to reasoning as a fallback. Normal `/reply` routes to the
+Ollama reasoning worker immediately before the existing single backend call.
+Identity is deliberately not a generative model capability and remains local and
+structured.
+
+For a vision decision whose resource snapshot marks reasoning as GPU-resident,
+the ResourceCoordinator can plan `release:ollama_reasoning`. Phase-4 pending
+`CognitiveTask`s can be converted into routing recommendations, but are not
+automatically executed.
+
+### Phase 5.1 – Resource-aware Worker Lifecycle ✅
+
+Phase 5.1 separates worker selection from resource planning and execution:
+
+```text
+TaskProfile → ModelRouter → RouteDecision
+                              ↓
+                    ResourceCoordinator
+                              ↓
+                       ResourcePlan
+                              ↓
+                  GPU lease + prepare
+                              ↓
+                        worker call
+```
+
+The Coordinator obtains GPU memory telemetry from a short, read-only
+`nvidia-smi` query without creating a CUDA context. Missing hardware, malformed
+output, and timeouts degrade to an unavailable snapshot without crashing the API.
+Ollama residency comes from `/api/ps`; SmolVLM residency comes from the successful
+local vision-client cache. These probes populate the real `active_workers` state.
+
+Per-worker resource profiles define GPU use, reuse preference, supported release,
+and incompatible workers to preempt. Planning is deterministic and performs no
+release or model call. Preparation executes only explicit release actions, once,
+through the existing targeted Ollama HTTP adapter. Resident targets produce a
+`reuse` action; absent targets remain lazy-loaded by their normal worker call.
+There is no automatic model preload or post-vision Gemma reload.
+
+A process-local GPU lease serializes the incompatible heavy worker sections.
+`/reply` holds it around the one Ollama call. `/see` performs structured perception
+first, then holds it for resource preparation and the semantic SmolVLM call.
+No-model and CPU-only operations do not acquire the GPU lock. The lease is always
+released in `finally`, including worker failures.
+
 ## Validated environment
 
 The current low-VRAM profile has been tested with:
@@ -328,6 +397,11 @@ OLLAMA_RUNTIME_LOG=./data/logs/ollama_runtime.log
 OLLAMA_MODEL=gemma4:e2b
 OLLAMA_TIMEOUT_MS=180000
 OLLAMA_URL=http://127.0.0.1:11434/api/chat
+AVACORE_MODEL_ROUTER_ENABLED=1
+AVACORE_MODEL_ROUTER_HISTORY_LIMIT=50
+AVACORE_RESOURCE_COORDINATOR_ENABLED=1
+AVACORE_RESOURCE_HISTORY_LIMIT=50
+AVACORE_GPU_QUERY_TIMEOUT_SECONDS=2
 
 # Telegram
 TELEGRAM_BOT_TOKEN=
@@ -742,6 +816,8 @@ GET /debug/commands
 GET /debug/orbits
 GET /debug/tasks
 GET /debug/questions
+GET /debug/model-router
+GET /debug/resources
 ```
 
 Phase 4 mutation and diagnostic endpoints currently include:
@@ -751,7 +827,17 @@ POST /orbits
 POST /orbits/{orbit_id}/{action}
 POST /questions/candidates
 POST /debug/task-drive/run
+POST /debug/model-router/route
+POST /debug/resources/plan
 ```
+
+`POST /debug/model-router/route` is admin-protected and diagnostic only. It records
+and returns a decision but never loads, unloads, or invokes a model. Router history
+is in-memory and bounded to the configured limit.
+
+`GET /debug/resources` exposes the current GPU snapshot, runtime-derived worker
+residency, and the last plan/execution. `POST /debug/resources/plan` is also
+admin-protected and planning-only: it executes no release and invokes no model.
 
 Use an environment variable rather than placing the admin password in shell history or documentation:
 
@@ -1770,7 +1856,9 @@ Known observations and backlog:
 
 - **Phase 3.1 – Entity Links:** implemented and accepted for continued development.
 - **Phase 4 – Cognitive Orbits + Task Drive:** implemented and validated. Persistent unresolved topics retain bounded baseline activation and can create bounded `CognitiveTask` and `QuestionCandidate` records when the explicitly invoked Task Drive is enabled. Automatic question delivery remains disabled.
-- **Phase 5 – Model Router:** next. Ava will select configured local workers for dialogue/reasoning, coding, vision, and review using deterministic routing where possible, without unnecessary LLM calls. Selection will consider availability and GPU/VRAM constraints and unload, preempt, or reuse workers according to task and resources.
+- **Phase 5.0 – Model Router Foundation:** implemented. Deterministic capability routing, no-model decisions, a settings-driven worker registry, explainable decisions, resource snapshots, and bounded in-memory history are available without Router-side LLM calls.
+- **Phase 5.1 – Resource-aware Worker Lifecycle:** implemented. Real GPU telemetry, runtime residency probes, deterministic ResourcePlans, targeted release/reuse, and a process-local GPU execution lease coordinate current workers without preloading them.
+- **Phase 5.2 – Coding/review evaluation:** planned. Evaluate and configure suitable local coding and review workers without enabling autonomous development loops.
 - **Phase 6 – Self Development Lab:** planned. Ava may run bounded code experiments in isolated Git worktrees, use separate coding/review roles, run tests, and produce human-reviewed `PatchProposal`s. It may not automatically overwrite, merge into, push, or restart production.
 
 Phase 5 target:

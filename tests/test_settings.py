@@ -55,3 +55,21 @@ def test_vision_preempts_reasoning_by_default_and_can_be_disabled(monkeypatch) -
     assert Settings().vision_preempt_reasoning is True
     monkeypatch.setenv("AVACORE_VISION_PREEMPT_REASONING", "0")
     assert Settings().vision_preempt_reasoning is False
+
+
+def test_model_router_defaults_are_enabled_and_bounded(monkeypatch) -> None:
+    monkeypatch.delenv("AVACORE_MODEL_ROUTER_ENABLED", raising=False)
+    monkeypatch.setenv("AVACORE_MODEL_ROUTER_HISTORY_LIMIT", "9999")
+    configured = Settings()
+    assert configured.model_router_enabled is True
+    assert configured.model_router_history_limit == 500
+
+
+def test_resource_coordinator_defaults_and_bounds(monkeypatch) -> None:
+    monkeypatch.delenv("AVACORE_RESOURCE_COORDINATOR_ENABLED", raising=False)
+    monkeypatch.setenv("AVACORE_RESOURCE_HISTORY_LIMIT", "9999")
+    monkeypatch.setenv("AVACORE_GPU_QUERY_TIMEOUT_SECONDS", "0")
+    configured = Settings()
+    assert configured.resource_coordinator_enabled is True
+    assert configured.resource_history_limit == 500
+    assert configured.gpu_query_timeout_seconds == .1

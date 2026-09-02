@@ -79,6 +79,21 @@ class Settings:
             "OLLAMA_RUNTIME_LOG",
             "./data/logs/ollama_runtime.log",
         ).strip()
+        self.model_router_enabled = os.environ.get(
+            "AVACORE_MODEL_ROUTER_ENABLED", "1"
+        ).strip() in {"1", "true", "True", "yes", "on"}
+        self.model_router_history_limit = bounded_int(
+            "AVACORE_MODEL_ROUTER_HISTORY_LIMIT", 50, 1, 500
+        )
+        self.resource_coordinator_enabled = os.environ.get(
+            "AVACORE_RESOURCE_COORDINATOR_ENABLED", "1"
+        ).strip() in {"1", "true", "True", "yes", "on"}
+        self.resource_history_limit = bounded_int(
+            "AVACORE_RESOURCE_HISTORY_LIMIT", 50, 1, 500
+        )
+        self.gpu_query_timeout_seconds = bounded_float(
+            "AVACORE_GPU_QUERY_TIMEOUT_SECONDS", 2.0, .1, 15.0
+        )
 
         self.http_host = os.environ.get("AVACORE_HTTP_HOST", "127.0.0.1")
         self.http_port = int(os.environ.get("AVACORE_HTTP_PORT", "8787"))

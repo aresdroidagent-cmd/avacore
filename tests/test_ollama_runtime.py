@@ -1,4 +1,4 @@
-from avacore.system.ollama_runtime import unload_ollama_model
+from avacore.system.ollama_runtime import loaded_ollama_models, unload_ollama_model
 
 
 class Response:
@@ -54,3 +54,10 @@ def test_unload_failure_is_nonfatal():
     assert unload_ollama_model(
         "gemma4:e2b", "http://localhost:11434/api/chat", session=session
     ) is False
+
+
+def test_loaded_models_uses_ollama_runtime_truth():
+    session = Session([{"name":"gemma4:e2b"}, {"model":"vision:test"}])
+    assert loaded_ollama_models(
+        "http://localhost:11434/api/chat", session=session
+    ) == ("gemma4:e2b", "vision:test")

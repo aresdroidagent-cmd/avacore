@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 import logging
@@ -84,10 +85,12 @@ class CameraPerceptionService:
                  detector: Callable[[Path], list[list[int]]] = detect_people,
                  recognizer: Callable[..., Any] = recognize_face_image,
                  describer: Callable[..., str] = describe_image_with_smolvlm,
-                 vision_preflight: Callable[[], Any] | None = None):
+                 vision_preflight: Callable[[], Any] | None = None,
+                 vision_lease: Callable[[], Any] | None = None):
         self.settings, self.continuum = settings, continuum
         self.capture, self.detector, self.recognizer, self.describer = capture, detector, recognizer, describer
         self.vision_preflight = vision_preflight
+        self.vision_lease = vision_lease
 
     def _retire_legacy_singleton(self) -> dict[str, Any]:
         graph = self.continuum._graph()
@@ -195,16 +198,18 @@ class CameraPerceptionService:
         description = ""
         description_at = None
         if include_scene and self.settings.vision_enabled:
-            if self.vision_preflight is not None:
-                try:
-                    self.vision_preflight()
-                except Exception:
-                    # Resource release is best-effort. The VLM still gets one
-                    # normal attempt and owns its existing OOM recovery path.
-                    _logger.warning("Vision resource preflight failed", exc_info=True)
-            description = self.describer(
-                scene_path, mode="camera", prompt=camera_scene_prompt(scene_language)
-            ) or ""
+            lease = self.vision_lease() if self.vision_lease is not None else nullcontext()
+            with lease:
+                if self.vision_preflight is not None:
+                    try:
+                        self.vision_preflight()
+                    except Exception:
+                        # Compatibility hook for callers predating the central
+                        # ResourceCoordinator.
+                        _logger.warning("Vision resource preflight failed", exc_info=True)
+                description = self.describer(
+                    scene_path, mode="camera", prompt=camera_scene_prompt(scene_language)
+                ) or ""
             resolved = {x["person_id"] for x in evidence if x.get("person_id")}
             for person_id, display_name in self.settings.known_persons.items():
                 if person_id not in resolved:

@@ -25,6 +25,22 @@ def _ollama_api_base(ollama_url: str) -> str:
     return url
 
 
+def loaded_ollama_models(
+    ollama_url: str,
+    timeout: float = 2.0,
+    session: requests.Session | None = None,
+) -> tuple[str, ...]:
+    """Return Ollama's own resident-model state without loading a model."""
+    client = session or requests.Session()
+    response = client.get(f"{_ollama_api_base(ollama_url)}/api/ps", timeout=timeout)
+    response.raise_for_status()
+    return tuple(sorted({
+        str(item.get("name") or item.get("model") or "").strip()
+        for item in (response.json().get("models") or [])
+        if item.get("name") or item.get("model")
+    }))
+
+
 def unload_ollama_model(
     model_name: str,
     ollama_url: str,
@@ -35,13 +51,9 @@ def unload_ollama_model(
     client = session or requests.Session()
     base_url = _ollama_api_base(ollama_url)
     try:
-        models_response = client.get(f"{base_url}/api/ps", timeout=timeout)
-        models_response.raise_for_status()
-        loaded = models_response.json().get("models") or []
-        loaded_names = {
-            str(item.get("name") or item.get("model") or "").strip()
-            for item in loaded
-        }
+        loaded_names = set(loaded_ollama_models(
+            ollama_url, timeout=timeout, session=client
+        ))
         if model_name not in loaded_names:
             return False
 
