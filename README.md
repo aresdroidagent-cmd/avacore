@@ -70,6 +70,19 @@ The project terminology has migrated from **J-Space** to **Ava Continuum**. Lega
 
 ## Current development status
 
+### Phase 2 – Cognitive continuity ✅
+
+Phase 2 remains the low-latency cognitive foundation: a persistent Self Model,
+session Working Memory, pre-LLM Spotlight selection, a bounded Conscious
+Workspace, the post-LLM Cognitive Gate, and assimilation into the next cognitive
+state. The normal `/reply` fast path makes at most one reasoning-model call.
+Identity resolution remains a safety and fallback mechanism rather than an extra
+reasoning pass. The protected debug endpoints and Workspace UI expose the real
+selected state.
+
+The Conscious Workspace is an engineering metaphor for access, attention, and
+continuity. AvaCore makes no claim of phenomenological consciousness.
+
 ### Phase 3.1 – Entity Links ✅
 
 Phase 3.1 is implemented and accepted for continued development. It provides:
@@ -110,6 +123,51 @@ The current development setup has successfully validated:
 - canonical `person:roger` linking into the Ava Continuum
 
 Real-world simultaneous known/unknown multi-person validation remains to be expanded. Anonymous-person and confidence-boundary behavior is currently covered by unit and integration tests.
+
+### Phase 4 – Cognitive Orbits + Task Drive ✅
+
+Phase 4 is implemented and real-world validated. A `CognitiveOrbit` represents
+an important unresolved topic that remains available in the Ava Continuum while
+outside the current Spotlight. Its persisted state includes identity, title,
+description, lifecycle status, importance, current and baseline activation,
+creation/activation/progress timestamps, unresolved questions, hypotheses,
+related entities, memories and tasks, progress records, and metadata.
+
+```text
+open / active / blocked
+        ↓
+dynamic activation decays toward the bounded baseline
+        ↓
+relevant Continuum events and relations reactivate the Orbit
+        ↓
+the Orbit may compete for Spotlight / Workspace access
+        ↓
+hypotheses, questions and progress are recorded
+        ↓
+resolved → activation strongly reduced
+        ↓
+reopen → unresolved baseline restored
+```
+
+This keeps unresolved topics persistent without allowing them to permanently
+dominate the Workspace. Acceptance testing covered Orbit creation, baseline and
+decay, relevant camera/person reactivation, rejection of irrelevant conversation,
+Spotlight competition, hypotheses, unresolved questions, progress, resolve and
+reopen, persistence across API restart, and persisted related tasks. One tested
+Orbit represented **Person recognition robustness**.
+
+The low-frequency `Task Drive` asks whether one useful bounded next action can
+advance an important unresolved Orbit. It is disabled by default and is governed
+by a minimum interval, maximum tasks per cycle, priority threshold, duplicate
+prevention, expected-cost metadata, and risk level. Prepared task types include
+`inspect`, `recall`, `analyze`, `research`, `vision`, `code`, `test`, `review`,
+and `ask_user`. Phase 4 creates structured tasks; it does not autonomously execute
+software development, route work across several models, or recurse indefinitely.
+
+An Orbit may also produce a separate persisted `QuestionCandidate`. Candidates
+have duplicate prevention, `already_asked`, and `delivery_enabled` state. A future
+interaction-window policy is represented in configuration, but automatic delivery
+and automatic Telegram questions remain disabled.
 
 ## Validated environment
 
@@ -301,6 +359,7 @@ AVACORE_VISION_ON_PDF_IMAGES=0
 AVACORE_VISION_ON_LOOSE_IMAGES=1
 AVACORE_VISION_MIN_IMAGE_PIXELS=90000
 AVACORE_VISION_MAX_NEW_TOKENS=40
+AVACORE_VISION_PREEMPT_REASONING=1
 
 # Web research
 AVACORE_RESEARCH_ENABLED=1
@@ -332,6 +391,13 @@ AVA_PERSON_RECOGNITION_ENABLED=1
 AVA_PERSON_CONFIDENCE_THRESHOLD=0.90
 AVA_KNOWN_PERSONS=roger:Roger
 AVA_TELEGRAM_PERSON_ID=roger
+
+# Phase 4 Cognitive Orbits (Task Drive remains opt-in)
+AVA_ORBIT_PATH=./data/state/cognitive_orbits.json
+AVA_TASK_DRIVE_ENABLED=0
+AVA_TASK_DRIVE_MINIMUM_INTERVAL_SECONDS=3600
+AVA_TASK_DRIVE_MAX_TASKS_PER_CYCLE=1
+AVA_TASK_DRIVE_PRIORITY_THRESHOLD=0.65
 
 # Calendar / daily briefing
 AVACORE_CALENDAR_ICS_URL=
@@ -607,11 +673,14 @@ Common commands:
 | `/workspace` | Compact Conscious Workspace | None |
 | `/continuum` | Compact Ava Continuum diagnostics | None |
 | `/memory` | Current/session Working Memory | None |
-| `/camera`, `/snapshot`, `/see` | Force structured perception and describe the current scene | One local semantic vision call; German output may use the existing translation path |
+| `/camera`, `/snapshot`, `/see` | Force structured perception and describe the current scene | One local semantic vision call; no reasoning call |
 | `/idcheck` | Force structured camera identity perception and show diagnostics | None |
 | `/persons` | Canonical known and currently tracked persons, refreshing stale perception | None |
 | `/who` | Answer who is visible using fresh/recent structured local perception | None |
 | `/why` | Structured activation factors, never hidden chain-of-thought | None |
+| `/orbits` | Current Cognitive Orbits and activation | None |
+| `/tasks` | Persisted Cognitive Tasks and Task Drive state | None |
+| `/questions` | Pending Question Candidates | None |
 
 Other existing commands remain available for language selection, model and health diagnostics, memory, documents, research, mail, calendar, browser control, switches, notes, personality, and local identity enrollment. `/help` is the authoritative runtime inventory.
 
@@ -619,8 +688,9 @@ Other existing commands remain available for language selection, model and healt
 
 The Telegram language selection is stored per chat for the current bot runtime
 and applies to text messages, transcribed voice messages and camera output. After
-a bot restart, Telegram defaults to German again. The camera description output
-may be translated, but the internal camera VLM prompt always remains English.
+a bot restart, Telegram defaults to German again. For camera output, SmolVLM is
+prompted directly in the requested language; an unexpected English response is
+kept rather than invoking a separate translation/reasoning model.
 
 Free text messages are forwarded to `/reply` with the selected language and can
 use chat history, verified memories, RAG context, policies, personality and the
@@ -648,7 +718,7 @@ Stale /who
 /see
 → one forced structured perception cycle
 → one local semantic vision call
-→ German output may additionally use the existing single translation reply call
+→ no reasoning/chat call
 
 normal /reply fast path
 → at most one reasoning/chat backend call
@@ -669,6 +739,18 @@ GET /debug/relations
 GET /debug/persons
 GET /debug/perception
 GET /debug/commands
+GET /debug/orbits
+GET /debug/tasks
+GET /debug/questions
+```
+
+Phase 4 mutation and diagnostic endpoints currently include:
+
+```text
+POST /orbits
+POST /orbits/{orbit_id}/{action}
+POST /questions/candidates
+POST /debug/task-drive/run
 ```
 
 Use an environment variable rather than placing the admin password in shell history or documentation:
@@ -1599,9 +1681,110 @@ candidate → verified → usable as trusted long-term context
 
 The historical design documents remain available in [docs/JSPACE.md](docs/JSPACE.md), [docs/CONSCIOUS_WORKSPACE_PHASE1.md](docs/CONSCIOUS_WORKSPACE_PHASE1.md), and [docs/JSPACE_PHASE2_COGNITIVE_CONTINUITY.md](docs/JSPACE_PHASE2_COGNITIVE_CONTINUITY.md).
 
+## GPU and vision runtime hardening
+
+The validated Quadro RTX 4000 setup exposed a concrete single-GPU resource
+conflict: after a normal `/reply`, Gemma remained resident in Ollama and occupied
+about 7.3 GiB of the 8-GiB GPU. A subsequent `/see` could not load SmolVLM and
+raised a CUDA out-of-memory error.
+
+Vision failures are now recoverable. A transient `torch.cuda.OutOfMemoryError`
+does not permanently disable vision, and only a successfully initialized client
+is cached. Request-local references are released and Python garbage collection
+and `torch.cuda.empty_cache()` are used where applicable. One failing request is
+reported with a short runtime message; there is no automatic or unbounded retry,
+and the next explicit vision request may try again. This behavior is covered by
+simulated CUDA-OOM tests and was validated on the real GPU.
+
+Semantic camera requests also apply a small single-GPU resource policy:
+
+```text
+normal chat → Gemma/Ollama may remain resident
+
+/see → vision resource preflight
+     → release the resident reasoning model when required
+     → run SmolVLM
+     → zero reasoning-model calls
+
+next normal chat → Gemma lazy-loads again when needed
+```
+
+The preflight checks Ollama's `/api/ps` state and, when the configured reasoning
+model is resident, submits an empty `/api/generate` request with `keep_alive: 0`.
+It is enabled by `AVACORE_VISION_PREEMPT_REASONING=1`. Failure to release Ollama
+is logged but does not crash the API; SmolVLM still receives one normal attempt.
+This is a focused resource policy, not the Phase 5 Model Router. The real sequence
+`normal chat → /see → /who → normal chat → /see` completed without manual GPU
+intervention.
+
+### Vision quality limitation
+
+The current semantic camera worker is
+`HuggingFaceTB/SmolVLM2-500M-Video-Instruct`. It is small, local, sufficiently
+fast, and runs on the 8-GiB GPU with resource preemption. Its scene-description
+quality is nevertheless limited and can produce weak, awkward, or hallucinated
+descriptions. This is a model-quality limitation rather than an identity,
+architecture, or CUDA-recovery issue. Local structured identity recognition is
+kept separate and cannot be overridden by the semantic VLM. Phase 5 should
+evaluate a stronger task-specific vision worker.
+
+## Phase 4 acceptance status
+
+The complete suite at Phase 4 closure reports **186 passed, 0 failed**, with five
+existing dependency/deprecation warnings from SWIG bindings and
+python-telegram-bot's `retry_after` compatibility path.
+
+```text
+Phase 4 Cognitive Orbits              PASS
+Orbit baseline / decay                PASS
+relevant reactivation                 PASS
+irrelevant event rejection            PASS
+Orbit → Spotlight / Workspace         PASS
+Hypothesis / Question / Progress       PASS
+Task Drive OFF default                PASS
+bounded Task Drive                    PASS
+Task duplicate prevention             PASS
+QuestionCandidate                     PASS
+Question duplicate prevention         PASS
+Resolve / Reopen                      PASS
+Persistence over API restart          PASS
+Vision OOM recovery                   PASS
+Reasoning/Vision GPU preemption        PASS
+/who deterministic                    PASS
+/see: 1 VLM / 0 reasoning LLM         PASS
+normal reply regression               PASS
+```
+
+Known observations and backlog:
+
+1. SmolVLM2-500M semantic scene quality is limited.
+2. Real unknown-person and simultaneous multi-person validation still requires another real-person test scenario.
+3. Visual tracking still relies largely on bounding-box overlap rather than a stronger motion/appearance tracker.
+4. Diagnostic commands such as `/focus` become Cognitive Events and may influence attention; a reduced diagnostic weight may be useful later.
+5. GPU concurrency remains a risk when expensive inference requests overlap.
+6. Task lifecycle coupling when an Orbit resolves may deserve refinement.
+7. Task Drive remains disabled by default.
+8. Automatic QuestionCandidate delivery remains disabled.
+
 ## Roadmap
 
 - **Phase 3.1 – Entity Links:** implemented and accepted for continued development.
-- **Phase 4 – Cognitive Orbits + Task Drive:** next. Persistent unresolved topics retain bounded baseline activation and may later create bounded `CognitiveTask` candidates. This is not implemented yet.
-- **Phase 5 – Model Router:** planned. Ava will select configured local workers for dialogue, reasoning, vision, coding, and review without equating the agent with any one model.
-- **Phase 6 – Self Development Lab:** planned. Ava may run bounded code experiments in isolated Git worktrees and produce tested `PatchProposal`s, but may not automatically overwrite, merge into, push, or restart production.
+- **Phase 4 – Cognitive Orbits + Task Drive:** implemented and validated. Persistent unresolved topics retain bounded baseline activation and can create bounded `CognitiveTask` and `QuestionCandidate` records when the explicitly invoked Task Drive is enabled. Automatic question delivery remains disabled.
+- **Phase 5 – Model Router:** next. Ava will select configured local workers for dialogue/reasoning, coding, vision, and review using deterministic routing where possible, without unnecessary LLM calls. Selection will consider availability and GPU/VRAM constraints and unload, preempt, or reuse workers according to task and resources.
+- **Phase 6 – Self Development Lab:** planned. Ava may run bounded code experiments in isolated Git worktrees, use separate coding/review roles, run tests, and produce human-reviewed `PatchProposal`s. It may not automatically overwrite, merge into, push, or restart production.
+
+Phase 5 target:
+
+```text
+Cognitive Task / Event
+        ↓
+Model Router
+        ↓
+deterministic task classification
+        ↓
+resource / VRAM policy
+        ↓
+best available worker
+        ↓
+result returned to AvaCore
+```

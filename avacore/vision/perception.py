@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import logging
 import re
 from typing import Any, Callable
 
@@ -12,7 +13,10 @@ from PIL import Image
 from avacore.core.continuum import ContinuumService, VisualObservation
 from avacore.tools.camera_rtsp import build_rtsp_url, capture_rtsp_snapshot, crop_camera_overlay
 from avacore.tools.identity_rag import recognize_face_image
-from avacore.vision.describe import describe_image_with_smolvlm
+from avacore.vision.describe import camera_scene_prompt, describe_image_with_smolvlm
+
+
+_logger = logging.getLogger(__name__)
 
 
 def _utc_now() -> str:
@@ -79,9 +83,11 @@ class CameraPerceptionService:
                  capture: Callable[..., Path] = capture_rtsp_snapshot,
                  detector: Callable[[Path], list[list[int]]] = detect_people,
                  recognizer: Callable[..., Any] = recognize_face_image,
-                 describer: Callable[..., str] = describe_image_with_smolvlm):
+                 describer: Callable[..., str] = describe_image_with_smolvlm,
+                 vision_preflight: Callable[[], Any] | None = None):
         self.settings, self.continuum = settings, continuum
         self.capture, self.detector, self.recognizer, self.describer = capture, detector, recognizer, describer
+        self.vision_preflight = vision_preflight
 
     def _retire_legacy_singleton(self) -> dict[str, Any]:
         graph = self.continuum._graph()
@@ -122,7 +128,7 @@ class CameraPerceptionService:
         return perception
 
     def request(self, *, reason: str, force: bool = False, include_scene: bool = False,
-                session_id: str = "perception:camera") -> PerceptionResult:
+                session_id: str = "perception:camera", scene_language: str = "en") -> PerceptionResult:
         cached = self.state()
         if cached.get("fresh") and not force and (not include_scene or cached.get("scene_description")):
             return PerceptionResult(**{key: cached.get(key) for key in PerceptionResult.__dataclass_fields__
@@ -189,7 +195,16 @@ class CameraPerceptionService:
         description = ""
         description_at = None
         if include_scene and self.settings.vision_enabled:
-            description = self.describer(scene_path, mode="camera") or ""
+            if self.vision_preflight is not None:
+                try:
+                    self.vision_preflight()
+                except Exception:
+                    # Resource release is best-effort. The VLM still gets one
+                    # normal attempt and owns its existing OOM recovery path.
+                    _logger.warning("Vision resource preflight failed", exc_info=True)
+            description = self.describer(
+                scene_path, mode="camera", prompt=camera_scene_prompt(scene_language)
+            ) or ""
             resolved = {x["person_id"] for x in evidence if x.get("person_id")}
             for person_id, display_name in self.settings.known_persons.items():
                 if person_id not in resolved:

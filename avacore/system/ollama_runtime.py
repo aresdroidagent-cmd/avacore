@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import shutil
 import socket
 import subprocess
@@ -8,9 +9,52 @@ import time
 from pathlib import Path
 from typing import Optional
 
+import requests
+
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 11434
+_logger = logging.getLogger(__name__)
+
+
+def _ollama_api_base(ollama_url: str) -> str:
+    url = ollama_url.rstrip("/")
+    for suffix in ("/api/chat", "/api/generate"):
+        if url.endswith(suffix):
+            return url[:-len(suffix)]
+    return url
+
+
+def unload_ollama_model(
+    model_name: str,
+    ollama_url: str,
+    timeout: float = 10.0,
+    session: requests.Session | None = None,
+) -> bool:
+    """Unload one resident Ollama model; return False for no-op or failure."""
+    client = session or requests.Session()
+    base_url = _ollama_api_base(ollama_url)
+    try:
+        models_response = client.get(f"{base_url}/api/ps", timeout=timeout)
+        models_response.raise_for_status()
+        loaded = models_response.json().get("models") or []
+        loaded_names = {
+            str(item.get("name") or item.get("model") or "").strip()
+            for item in loaded
+        }
+        if model_name not in loaded_names:
+            return False
+
+        response = client.post(
+            f"{base_url}/api/generate",
+            json={"model": model_name, "prompt": "", "stream": False, "keep_alive": 0},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        return True
+    except Exception:
+        _logger.warning("Could not release Ollama model before vision", exc_info=True)
+        return False
 
 
 def is_port_open(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, timeout: float = 1.0) -> bool:

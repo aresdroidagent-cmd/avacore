@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import gc
+import logging
 import re
+import threading
+
+import torch
 
 from PIL import Image
 
@@ -10,8 +15,12 @@ from avacore.vision.smolvlm_client import SmolVLMClient
 
 
 _client: SmolVLMClient | None = None
+# Kept for compatibility with diagnostics/tests from the old implementation.
+# Failures are no longer latched for the lifetime of the API process.
 _client_failed: bool = False
 _client_error: str = ""
+_client_lock = threading.Lock()
+_logger = logging.getLogger(__name__)
 
 
 SCREEN_UI_PROMPT = (
@@ -63,25 +72,53 @@ CAMERA_SCENE_PROMPT = (
     "Answer in one short factual sentence."
 )
 
+CAMERA_SCENE_PROMPT_DE = (
+    "Du siehst ein aktuelles Bild einer Innenraumkamera. "
+    "Beschreibe ausschließlich die sichtbare reale Szene. "
+    "Ignoriere Zeitstempel, Kameranamen, Daten, Zahlen, Beschriftungen, Einblendungen und Text im Bild. "
+    "Erfinde keine Geschichte, kein Diagramm, Spiel, Konto, Dokument oder Verfahren. "
+    "Konzentriere dich auf sichtbare Dinge wie Raum, Sofa, Tür, Möbel, Personen, Licht, Wände, Fenster und Geräte. "
+    "Wenn eine Person sichtbar ist, sage nur, dass eine Person sichtbar ist und ungefähr wo sie sich befindet. "
+    "Identifiziere die Person nicht. Wenn die Szene unklar ist, sage: 'Die Szene ist nicht klar erkennbar.' "
+    "Antworte auf Deutsch in einem kurzen sachlichen Satz."
+)
+
+
+def camera_scene_prompt(language: str = "en") -> str:
+    return CAMERA_SCENE_PROMPT_DE if language.strip().lower().startswith("de") else CAMERA_SCENE_PROMPT
+
+
+def _release_cuda_cache() -> None:
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
 def get_vision_client() -> SmolVLMClient:
     global _client, _client_failed, _client_error
 
     if _client is not None:
         return _client
 
-    if _client_failed:
-        raise RuntimeError(f"Vision client unavailable: {_client_error}")
-
-    try:
-        _client = SmolVLMClient(
-            model_name=settings.vision_model,
-            max_new_tokens=settings.vision_max_new_tokens,
-        )
-        return _client
-    except Exception as exc:
-        _client_failed = True
-        _client_error = str(exc)
-        raise
+    with _client_lock:
+        if _client is not None:
+            return _client
+        try:
+            candidate = SmolVLMClient(
+                model_name=settings.vision_model,
+                max_new_tokens=settings.vision_max_new_tokens,
+            )
+        except Exception as exc:
+            _client_failed = False
+            _client_error = str(exc)
+            _release_cuda_cache()
+            _logger.exception("Vision client initialization failed; a later request may retry")
+            if isinstance(exc, torch.cuda.OutOfMemoryError):
+                raise RuntimeError("Vision temporarily unavailable: insufficient GPU memory; retry later.") from exc
+            raise
+        _client = candidate
+        _client_failed = False
+        _client_error = ""
+        return candidate
 
 
 def is_image_large_enough(image_path: Path) -> bool:
@@ -245,6 +282,7 @@ def describe_image_with_smolvlm(
     ocr_text: str = "",
     mode: str | None = None,
     page_text: str = "",
+    camera_language: str = "en",
 ) -> str:
     if not settings.vision_enabled:
         return ""
@@ -272,7 +310,7 @@ def describe_image_with_smolvlm(
         # OCR/page context. The D-Link timestamp overlay otherwise dominates the
         # tiny VLM and causes nonsense descriptions.
         if selected_mode == "camera":
-            final_prompt = base_prompt
+            final_prompt = camera_scene_prompt(camera_language)
         else:
             effective_prompt = default_prompt if default_prompt else base_prompt
             final_prompt = build_contextual_prompt(
@@ -280,10 +318,12 @@ def describe_image_with_smolvlm(
                 page_text=page_text,
             )
 
-    return client.describe_image(
-        image_path=image_path,
-        prompt=final_prompt,
-    )
+    try:
+        return client.describe_image(image_path=image_path, prompt=final_prompt)
+    except torch.cuda.OutOfMemoryError as exc:
+        _release_cuda_cache()
+        _logger.exception("CUDA out of memory during vision generation")
+        raise RuntimeError("Vision temporarily unavailable: insufficient GPU memory; retry later.") from exc
 
 def detect_image_mode(
     image_path: Path,

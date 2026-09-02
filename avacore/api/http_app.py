@@ -48,7 +48,7 @@ from avacore.tools.web_research import (
 from avacore.mail.service import MailService
 from avacore.vision.describe import describe_image_with_smolvlm, detect_image_mode
 from avacore.vision.perception import CameraPerceptionService
-from avacore.system.ollama_runtime import start_ollama_server
+from avacore.system.ollama_runtime import start_ollama_server, unload_ollama_model
 from avacore.core.jspace import (
     clamp,
     read_jspace_debug,
@@ -66,6 +66,7 @@ from avacore.core.cognitive_workspace import (
     workspace_prompt,
 )
 from avacore.core.continuum import ContinuumService, VisualObservation
+from avacore.core.orbits import OrbitStore
 
 _ollama_process = None
 _pending_cognitive_cycles: dict[str, dict] = {}
@@ -83,11 +84,22 @@ def continuum_service() -> ContinuumService:
         confidence_threshold=settings.person_confidence_threshold,
         event_cooldown=settings.vision_event_cooldown,
         known_persons=settings.known_persons,
+        orbit_path=settings.orbit_path,
     )
 
 
+def orbit_store() -> OrbitStore:
+    return OrbitStore(settings.orbit_path)
+
+
 def camera_perception_service() -> CameraPerceptionService:
-    return CameraPerceptionService(settings, continuum_service())
+    preflight = None
+    if settings.vision_preempt_reasoning:
+        preflight = lambda: unload_ollama_model(
+            settings.ollama_model, settings.ollama_url,
+            timeout=min(10.0, settings.ollama_timeout_ms / 1000.0),
+        )
+    return CameraPerceptionService(settings, continuum_service(), vision_preflight=preflight)
 
 
 # -----------------------------------------------------------------------------
@@ -268,6 +280,28 @@ class CameraPerceptionRequest(BaseModel):
     force: bool = False
     include_scene: bool = False
     session_id: str = "perception:camera"
+    scene_language: str = "en"
+
+
+class OrbitCreateRequest(BaseModel):
+    title: str
+    description: str
+    importance: float = .5
+    baseline_activation: float = .05
+    related_entities: list[str] = []
+    metadata: dict = {}
+
+
+class OrbitActionRequest(BaseModel):
+    text: str = ""
+    kind: str = "progress"
+
+
+class QuestionCandidateRequest(BaseModel):
+    orbit_id: str
+    question: str
+    importance: float = .5
+    reason: str
 
 
 class ResetRequest(BaseModel):
@@ -346,6 +380,7 @@ class VisionDescribeRequest(BaseModel):
     image_path: str
     mode: str | None = None
     ocr_text: str = ""
+    camera_language: str = "en"
 
 
 class BrowserOpenRequest(BaseModel):
@@ -1036,6 +1071,10 @@ def get_hybrid_context(
     working_memory = None
     active_memory = []
     if getattr(settings, "jspace_enabled", False):
+        orbits = orbit_store()
+        orbits.decay(.88)
+        orbits.react(content=payload_text, related_entities=[])
+        candidates.extend(orbits.candidates())
         self_model_path = getattr(settings, "self_model_path", Path("./data/state/self_model.json"))
         self_model = SelfModel.load(self_model_path, name=settings.assistant_name,
                                     system_name=settings.system_name, underlying_model=settings.ollama_model,
@@ -1381,6 +1420,76 @@ def debug_relations(_: None = Depends(verify_admin_password)) -> dict:
     return {"items": [asdict(x) for x in continuum_service().relations()]}
 
 
+@app.get("/debug/orbits")
+def debug_orbits(_: None = Depends(verify_admin_password)) -> dict:
+    return {"items":[asdict(x) for x in orbit_store().orbits()]}
+
+
+@app.get("/debug/tasks")
+def debug_tasks(_: None = Depends(verify_admin_password)) -> dict:
+    return {"task_drive_enabled":settings.task_drive_enabled,
+            "items":[asdict(x) for x in orbit_store().tasks()]}
+
+
+@app.get("/debug/questions")
+def debug_questions(_: None = Depends(verify_admin_password)) -> dict:
+    return {"automatic_delivery_enabled":False,
+            "future_interaction_window":{"timezone":settings.question_interaction_timezone,
+                "start":settings.question_interaction_window_start,
+                "end":settings.question_interaction_window_end},
+            "items":[asdict(x) for x in orbit_store().questions()]}
+
+
+@app.post("/orbits")
+def create_orbit(payload: OrbitCreateRequest, _: None = Depends(verify_admin_password)) -> dict:
+    orbit = orbit_store().create_orbit(payload.title, payload.description,
+        importance=payload.importance, baseline_activation=payload.baseline_activation,
+        related_entities=payload.related_entities, metadata=payload.metadata)
+    continuum_service().relate(f"orbit:{orbit.orbit_id}", "participates_in", "continuum:ava",
+        confidence=1.0, source="orbit", metadata={"orbit_id":orbit.orbit_id})
+    for entity_id in orbit.related_entities:
+        continuum_service().relate(f"orbit:{orbit.orbit_id}", "related_to", entity_id,
+            confidence=1.0, source="orbit", metadata={"orbit_id":orbit.orbit_id})
+    return asdict(orbit)
+
+
+@app.post("/orbits/{orbit_id}/{action}")
+def update_orbit(orbit_id: str, action: str, payload: OrbitActionRequest,
+                 _: None = Depends(verify_admin_password)) -> dict:
+    store = orbit_store()
+    try:
+        if action == "progress": orbit = store.record_progress(orbit_id, payload.text, kind=payload.kind)
+        elif action == "hypothesis": orbit = store.add_hypothesis(orbit_id, payload.text)
+        elif action == "question": orbit = store.add_question(orbit_id, payload.text)
+        elif action == "resolve": orbit = store.resolve(orbit_id, payload.text)
+        elif action == "reopen": orbit = store.reopen(orbit_id)
+        else: raise HTTPException(status_code=400, detail="unsupported orbit action")
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="orbit not found") from exc
+    return asdict(orbit)
+
+
+@app.post("/questions/candidates")
+def create_orbit_question(payload: QuestionCandidateRequest,
+                          _: None = Depends(verify_admin_password)) -> dict:
+    try:
+        candidate = orbit_store().create_question_candidate(payload.orbit_id, payload.question,
+            importance=payload.importance, reason=payload.reason)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="orbit not found") from exc
+    return {"created":candidate is not None, "item":asdict(candidate) if candidate else None,
+            "automatic_delivery_enabled":False}
+
+
+@app.post("/debug/task-drive/run")
+def run_task_drive(_: None = Depends(verify_admin_password)) -> dict:
+    tasks = orbit_store().run_task_drive(enabled=settings.task_drive_enabled,
+        minimum_interval_seconds=settings.task_drive_minimum_interval_seconds,
+        max_tasks=settings.task_drive_max_tasks_per_cycle,
+        priority_threshold=settings.task_drive_priority_threshold)
+    return {"enabled":settings.task_drive_enabled, "created":[asdict(x) for x in tasks]}
+
+
 @app.get("/debug/perception")
 def debug_perception(_: None = Depends(verify_admin_password)) -> dict:
     data = continuum_service()._read(settings.persons_path, {})
@@ -1412,7 +1521,8 @@ def request_camera_perception(payload: CameraPerceptionRequest,
                               _: None = Depends(verify_admin_password)) -> dict:
     try:
         return asdict(camera_perception_service().request(reason=payload.reason, force=payload.force,
-            include_scene=payload.include_scene, session_id=payload.session_id))
+            include_scene=payload.include_scene, session_id=payload.session_id,
+            scene_language=payload.scene_language))
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -1750,6 +1860,7 @@ def vision_describe_image(payload: VisionDescribeRequest) -> dict:
             Path(payload.image_path),
             ocr_text=payload.ocr_text,
             mode=payload.mode,
+            camera_language=payload.camera_language,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"vision describe failed: {exc}") from exc

@@ -260,6 +260,8 @@ def command_help_text() -> str:
         "/workspace - Conscious Workspace\n/memory - aktuelle Working Memory\n"
         "/persons - registrierte Personen\n/who - aktuell anwesende Person\n"
         "/why - strukturierte Aktivierungsgründe\n/bsp - installationsspezifische BSP-Aktion"
+        "\n/orbits - offene Cognitive Orbits\n/tasks - Cognitive Tasks\n"
+        "/questions - vorbereitete Rückfragen (keine automatische Zustellung)"
 
     )
 
@@ -704,58 +706,6 @@ def clean_camera_description(description: str) -> str:
         return "Die reale Szene ist nicht zuverlässig erkennbar; das Modell hat hauptsächlich das Kamera-Overlay erkannt."
 
     return text
-
-
-async def translate_camera_description_to_german(description: str) -> str:
-    text = (description or "").strip()
-
-    if not text:
-        return ""
-
-    # Wenn es schon deutsch wirkt, nicht unnötig übersetzen.
-    german_markers = [
-        "ich sehe",
-        "eine person",
-        "ein sofa",
-        "eine tür",
-        "wohnzimmer",
-        "raum",
-        "sichtbar",
-        "nicht zuverlässig erkennbar",
-    ]
-
-    if any(marker in text.lower() for marker in german_markers):
-        return text
-
-    try:
-        response = await http_client.post(
-            f"{api_base()}/reply",
-            json={
-                "channel": "internal",
-                "user_id": "system",
-                "chat_id": "camera-translation",
-                "text": (
-                    "Übersetze die folgende Kamerabeschreibung ins Deutsche. "
-                    "Formuliere sie kurz, sachlich und natürlich. "
-                    "Erfinde keine zusätzlichen Details. "
-                    "Wenn die Beschreibung unsicher klingt, behalte diese Unsicherheit bei.\n\n"
-                    f"Beschreibung:\n{text}"
-                ),
-                "timestamp": int(time.time()),
-            },
-            timeout=120,
-        )
-
-        if not response.ok:
-            return text
-
-        data = response.json()
-        translated = (data.get("reply") or data.get("answer") or "").strip()
-
-        return translated or text
-
-    except Exception:
-        return text
 
 
 async def weather_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1487,6 +1437,7 @@ async def camera_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                     "image_path": str(scene_image_path),
                     "mode": "camera",
                     "ocr_text": "",
+                    "camera_language": language,
                 },
                 timeout=180,
             )
@@ -1501,8 +1452,6 @@ async def camera_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                     or ""
                 ).strip()
                 description = clean_camera_description(description)
-                if language == "de":
-                    description = await translate_camera_description_to_german(description)
             else:
                 try:
                     detail = vision_response.json().get("detail", vision_response.text)
@@ -2270,13 +2219,14 @@ async def _debug_json(path: str):
 
 
 async def _request_camera_perception(update: Update, *, reason: str, force: bool,
-                                     include_scene: bool) -> tuple[dict, str | None]:
+                                     include_scene: bool, scene_language: str = "en") -> tuple[dict, str | None]:
     if not update.effective_chat:
         return {}, "No Telegram chat context."
     try:
         response = await http_client.post(f"{api_base()}/perception/camera", json={
             "reason": reason, "force": force, "include_scene": include_scene,
-            "session_id": f"telegram:{update.effective_chat.id}"},
+            "session_id": f"telegram:{update.effective_chat.id}",
+            "scene_language": scene_language},
             headers=admin_headers(), timeout=240 if include_scene else 120)
     except Exception as exc:
         return {}, f"Camera perception failed: {exc}"
@@ -2289,12 +2239,14 @@ async def _request_camera_perception(update: Update, *, reason: str, force: bool
 
 async def active_camera_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_message: return
-    data, error = await _request_camera_perception(update, reason="see_command", force=True, include_scene=True)
+    language = telegram_reply_language(context)
+    data, error = await _request_camera_perception(
+        update, reason="see_command", force=True, include_scene=True,
+        scene_language=language,
+    )
     if error:
         await update.effective_message.reply_text(error); return
     description = clean_camera_description(data.get("scene_description") or "")
-    if description and telegram_reply_language(context) == "de":
-        description = await translate_camera_description_to_german(description)
     known = data.get("identities_resolved") or []
     unknown_count = sum(1 for x in data.get("persons", []) if not x.get("person_id"))
     structured = []
@@ -2408,6 +2360,34 @@ async def why_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text("Why current focus:\n" + ("\n".join(lines) or "No active focus."))
 
 
+async def orbits_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message: return
+    response = await _debug_json("/debug/orbits"); items = response.json().get("items", []) if response.ok else []
+    visible = [x for x in items if x.get("status") != "archived"]
+    text = "Cognitive Orbits:\n" + ("\n".join(
+        f"{index}. {x.get('title')} – {x.get('status')} – {x.get('activation',0):.2f}"
+        for index, x in enumerate(visible[:12], 1)) or "No cognitive orbits.")
+    await update.effective_message.reply_text(text)
+
+
+async def tasks_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message: return
+    response = await _debug_json("/debug/tasks"); data = response.json() if response.ok else {}; items = data.get("items", [])
+    text = f"Cognitive Tasks (drive {'on' if data.get('task_drive_enabled') else 'off'}):\n" + ("\n".join(
+        f"{index}. {x.get('title')} – {x.get('task_type')} – {x.get('status')}"
+        for index, x in enumerate(items[-12:], 1)) or "No cognitive tasks.")
+    await update.effective_message.reply_text(text)
+
+
+async def questions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message: return
+    response = await _debug_json("/debug/questions"); data = response.json() if response.ok else {}; items = data.get("items", [])
+    pending = [x for x in items if not x.get("already_asked")]
+    text = "Question Candidates (automatic delivery off):\n" + ("\n".join(
+        f"{index}. {x.get('question')}" for index, x in enumerate(pending[:12], 1)) or "No pending questions.")
+    await update.effective_message.reply_text(text)
+
+
 async def bsp_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_message:
         await update.effective_message.reply_text("BSP ist in dieser Installation nicht konfiguriert.")
@@ -2462,6 +2442,7 @@ def build_app(
         CommandSpec("focus", focus_cmd, "Current Spotlight"), CommandSpec("continuum", continuum_cmd, "Continuum summary"),
         CommandSpec("workspace", workspace_cmd, "Conscious Workspace"), CommandSpec("memory", memory_cmd, "Working Memory"),
         CommandSpec("persons", persons_cmd, "Known persons"), CommandSpec("who", who_cmd, "Who is present"), CommandSpec("why", why_cmd, "Activation reasons"),
+        CommandSpec("orbits", orbits_cmd, "Cognitive Orbits"), CommandSpec("tasks", tasks_cmd, "Cognitive Tasks"), CommandSpec("questions", questions_cmd, "Question candidates"),
         CommandSpec("bsp", bsp_cmd, "Installation-specific BSP action"),
     ]
     global COMMAND_REGISTRY

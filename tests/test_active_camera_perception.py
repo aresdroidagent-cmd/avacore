@@ -63,6 +63,46 @@ def test_forced_see_always_captures_and_requests_semantics(tmp_path):
     assert calls["description"] == 2
 
 
+def test_semantic_perception_preempts_before_vlm(tmp_path):
+    order = []
+    service = CameraPerceptionService(
+        configuration(tmp_path), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: [],
+        recognizer=lambda **_: None,
+        vision_preflight=lambda: order.append("unload"),
+        describer=lambda *_a, **_k: (order.append("vlm") or "empty room"),
+    )
+    service.request(reason="see_command", force=True, include_scene=True)
+    assert order == ["unload", "vlm"]
+
+
+def test_structured_perception_does_not_preempt_or_call_vlm(tmp_path):
+    calls = []
+    service = CameraPerceptionService(
+        configuration(tmp_path), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: [],
+        recognizer=lambda **_: None,
+        vision_preflight=lambda: calls.append("unload"),
+        describer=lambda *_a, **_k: calls.append("vlm"),
+    )
+    service.request(reason="who_command", force=True, include_scene=False)
+    assert calls == []
+
+
+def test_preflight_failure_does_not_abort_semantic_perception(tmp_path):
+    calls = []
+    service = CameraPerceptionService(
+        configuration(tmp_path), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: [],
+        recognizer=lambda **_: None,
+        vision_preflight=lambda: (_ for _ in ()).throw(RuntimeError("Ollama offline")),
+        describer=lambda *_a, **_k: (calls.append("vlm") or "empty room"),
+    )
+    result = service.request(reason="see_command", force=True, include_scene=True)
+    assert result.scene_description == "empty room"
+    assert calls == ["vlm"]
+
+
 def test_who_path_does_not_require_semantic_model(tmp_path):
     service = CameraPerceptionService(configuration(tmp_path), continuum(tmp_path),
         capture=lambda **_: frame(tmp_path), detector=lambda _: [], recognizer=lambda **_: None,
@@ -160,6 +200,39 @@ async def test_who_command_refreshes_without_idcheck_and_uses_no_llm(monkeypatch
     await bot.who_cmd(update, SimpleNamespace())
     assert calls["perception"] == 1
     assert replies == ["Roger is currently present."]
+
+
+@pytest.mark.anyio
+async def test_see_uses_one_perception_call_and_no_reply_translation(monkeypatch, tmp_path):
+    from avacore.channels.telegram import bot
+    replies = []
+    update = SimpleNamespace(
+        effective_chat=SimpleNamespace(id=42),
+        effective_message=SimpleNamespace(
+            reply_text=lambda text: _reply(replies, text),
+            reply_photo=lambda **kwargs: _reply(replies, kwargs.get("caption", "")),
+        ),
+    )
+
+    class Response:
+        ok = True
+        text = ""
+        def json(self):
+            image_path = tmp_path / "missing-camera-frame.jpg"
+            return {"scene_description":"A person is by the sofa", "persons":[],
+                    "identities_resolved":[], "image_path":str(image_path)}
+
+    urls = []
+    async def post(url, **kwargs):
+        urls.append((url, kwargs.get("json") or {}))
+        return Response()
+
+    monkeypatch.setattr(bot.http_client, "post", post)
+    await bot.active_camera_cmd(update, SimpleNamespace(chat_data={"reply_language":"de"}))
+    assert len(urls) == 1
+    assert urls[0][0].endswith("/perception/camera")
+    assert urls[0][1]["scene_language"] == "de"
+    assert not any(url.endswith("/reply") for url, _ in urls)
 
 
 async def _reply(items, text):

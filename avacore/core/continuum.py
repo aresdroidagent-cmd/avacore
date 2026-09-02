@@ -9,6 +9,7 @@ from typing import Any
 
 from avacore.core.cognitive_workspace import WorkingMemory, run_workspace_cycle
 from avacore.core.jspace import ContinuumState, clamp, infer_jspace_tags
+from avacore.core.orbits import OrbitStore
 
 
 def now() -> str:
@@ -104,7 +105,8 @@ class ContinuumService:
                  working_memory_path: Path | str, history_path: Path | str,
                  persons_path: Path | str, *, history_limit: int = 200,
                  confidence_threshold: float = .78, event_cooldown: float = 10.0,
-                 known_persons: dict[str, str] | None = None):
+                 known_persons: dict[str, str] | None = None,
+                 orbit_path: Path | str | None = None):
         self.continuum_path, self.workspace_path = Path(continuum_path), Path(workspace_path)
         self.working_memory_path, self.history_path = Path(working_memory_path), Path(history_path)
         self.persons_path = Path(persons_path)
@@ -112,6 +114,7 @@ class ContinuumService:
         self.confidence_threshold = confidence_threshold
         self.event_cooldown = event_cooldown
         self.known_persons = dict(known_persons or {})
+        self.orbit_path = Path(orbit_path) if orbit_path else None
 
     @staticmethod
     def _read(path: Path, default: Any) -> Any:
@@ -147,6 +150,12 @@ class ContinuumService:
             wm.add("user" if event.kind == "user_command" else "system", event.content,
                    event.cycle_id, kind=event.kind, importance=event.salience)
             wm.save()
+        orbit_candidates: list[dict[str, Any]] = []
+        if self.orbit_path:
+            orbit_store = OrbitStore(self.orbit_path)
+            orbit_store.decay(.88)
+            orbit_store.react(content=event.content, related_entities=event.related_entities)
+            orbit_candidates = orbit_store.candidates()
         # Use the Phase-2 activation/competition path; this does not invoke an
         # LLM and does not force the event into the selected subset.
         run_workspace_cycle(
@@ -157,7 +166,7 @@ class ContinuumService:
                          "priority": event.salience, "confidence": event.confidence,
                          "continuity": .9, "metadata": {**event.metadata,
                          "event_id": event.id, "cycle_id": event.cycle_id,
-                         "session_id": event.session_id}}],
+                         "session_id": event.session_id}}] + orbit_candidates,
             session_id=event.session_id,
         )
         return event
@@ -224,7 +233,13 @@ class ContinuumService:
             for entity_id in (relation.subject_id, relation.object_id):
                 if not entity_id.startswith(("person:", "track:")):
                     other.setdefault(entity_id, {"id": entity_id, "kind": entity_id.split(":", 1)[0]})
-        return persons + tracks + list(other.values())
+        cognitive: list[dict[str, Any]] = []
+        if self.orbit_path:
+            store = OrbitStore(self.orbit_path)
+            cognitive += [{"id":f"orbit:{x.orbit_id}", "kind":"cognitive_orbit", **asdict(x)} for x in store.orbits()]
+            cognitive += [{"id":f"task:{x.task_id}", "kind":"cognitive_task", **asdict(x)} for x in store.tasks()]
+            cognitive += [{"id":f"question:{x.question_id}", "kind":"question_candidate", **asdict(x)} for x in store.questions()]
+        return persons + tracks + list(other.values()) + cognitive
 
     @staticmethod
     def _upsert_relation(relations: dict[str, EntityRelation], subject_id: str, predicate: str,

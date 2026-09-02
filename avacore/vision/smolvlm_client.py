@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import gc
 
 import torch
 from PIL import Image
@@ -65,35 +66,32 @@ class SmolVLMClient:
             raise FileNotFoundError(f"image not found: {image_path}")
 
         # Früher Fehler, falls Datei kein gültiges Bild ist
-        Image.open(image_path).convert("RGB")
+        with Image.open(image_path) as image:
+            image.convert("RGB")
 
         conversation = self._build_conversation(image_path, prompt)
 
-        inputs = self.processor.apply_chat_template(
-            conversation,
-            add_generation_prompt=True,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt",
-        )
-
-        inputs = self._move_inputs(inputs)
-
-        with torch.no_grad():
-            output_ids = self.model.generate(
-                **inputs,
-                max_new_tokens=self.max_new_tokens,
-                do_sample=False,
-                repetition_penalty=1.15,
-                no_repeat_ngram_size=3,
+        inputs = output_ids = generated_ids = None
+        try:
+            inputs = self.processor.apply_chat_template(
+                conversation, add_generation_prompt=True, tokenize=True,
+                return_dict=True, return_tensors="pt",
             )
-
-        input_length = inputs["input_ids"].shape[1]
-        generated_ids = output_ids[:, input_length:]
-
-        text = self.processor.batch_decode(
-            generated_ids,
-            skip_special_tokens=True,
-        )[0].strip()
-
-        return text
+            inputs = self._move_inputs(inputs)
+            with torch.no_grad():
+                output_ids = self.model.generate(
+                    **inputs, max_new_tokens=self.max_new_tokens, do_sample=False,
+                    repetition_penalty=1.15, no_repeat_ngram_size=3,
+                )
+            input_length = inputs["input_ids"].shape[1]
+            generated_ids = output_ids[:, input_length:]
+            return self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+        except torch.cuda.OutOfMemoryError:
+            # Keep the successfully loaded model, but release request-scoped CUDA
+            # tensors so the next explicit request gets a clean attempt.
+            raise
+        finally:
+            del inputs, output_ids, generated_ids, conversation
+            gc.collect()
+            if self.device == "cuda":
+                torch.cuda.empty_cache()

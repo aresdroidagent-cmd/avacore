@@ -165,6 +165,9 @@ class Settings:
             "",
         ).strip()
         self.vision_max_new_tokens = int(os.environ.get("AVACORE_VISION_MAX_NEW_TOKENS", "64"))
+        self.vision_preempt_reasoning = os.environ.get(
+            "AVACORE_VISION_PREEMPT_REASONING", "1"
+        ).strip() in {"1", "true", "True", "yes", "on"}
         self.vision_on_pdf_images = os.environ.get(
             "AVACORE_VISION_ON_PDF_IMAGES", "0"
         ).strip() not in {"0", "false", "False"}
@@ -395,6 +398,15 @@ class Settings:
             # The existing local enrollment tool has one deliberate known label.
             self.known_persons.setdefault("roger", "Roger")
         self.telegram_person_id = os.environ.get("AVA_TELEGRAM_PERSON_ID", "").strip() or None
+        self.orbit_path = Path(os.environ.get("AVA_ORBIT_PATH", "./data/state/cognitive_orbits.json")).expanduser()
+        self.task_drive_enabled = os.environ.get("AVA_TASK_DRIVE_ENABLED", "0").strip() in {"1", "true", "True", "yes", "on"}
+        self.task_drive_minimum_interval_seconds = bounded_int("AVA_TASK_DRIVE_MINIMUM_INTERVAL_SECONDS", 3600, 60, 86400 * 30)
+        self.task_drive_max_tasks_per_cycle = bounded_int("AVA_TASK_DRIVE_MAX_TASKS_PER_CYCLE", 1, 0, 10)
+        self.task_drive_priority_threshold = bounded_float("AVA_TASK_DRIVE_PRIORITY_THRESHOLD", .65, 0.0, 1.0)
+        self.question_delivery_enabled = False
+        self.question_interaction_timezone = os.environ.get("AVA_QUESTION_INTERACTION_TIMEZONE", "Europe/Zurich").strip()
+        self.question_interaction_window_start = os.environ.get("AVA_QUESTION_INTERACTION_WINDOW_START", "19:00").strip()
+        self.question_interaction_window_end = os.environ.get("AVA_QUESTION_INTERACTION_WINDOW_END", "20:00").strip()
         self.self_model_path = Path(os.environ.get("AVACORE_SELF_MODEL_PATH", "./data/state/self_model.json")).expanduser()
         self.working_memory_max_items = bounded_int("AVACORE_WORKING_MEMORY_MAX_ITEMS", 24, 8, 100)
         self.working_memory_active_items = bounded_int("AVACORE_WORKING_MEMORY_ACTIVE_ITEMS", 10, 2, 32)

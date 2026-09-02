@@ -328,7 +328,7 @@ def _decay(state: JSpaceState, conversation_factor: float, general_factor: float
 def _inject_candidate(state: JSpaceState, candidate: dict[str, Any], query: str) -> CognitiveEntity:
     content = str(candidate.get("content") or "").strip()
     retrieval = clamp(candidate.get("relevance", lexical_relevance(query, content)))
-    return state.inject(
+    item = state.inject(
         source=str(candidate.get("source") or "system"),
         kind=str(candidate.get("kind") or "system_state"),
         content=content,
@@ -348,6 +348,10 @@ def _inject_candidate(state: JSpaceState, candidate: dict[str, Any], query: str)
         source_ref=candidate.get("source_ref"),
         metadata=dict(candidate.get("metadata") or {}),
     )
+    if candidate.get("metadata", {}).get("replace_activation"):
+        item.activation = clamp(candidate.get("activation", 0.0))
+        item.relevance = retrieval
+    return item
 
 
 def _debug_item(item: CognitiveEntity, score: float, components: dict[str, float], selected: bool, rank: int) -> dict[str, Any]:

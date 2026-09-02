@@ -48,3 +48,10 @@ def test_person_recognition_can_still_be_explicitly_disabled(monkeypatch) -> Non
     monkeypatch.setenv("AVACORE_IDENTITY_ENABLED", "1")
     monkeypatch.setenv("AVA_PERSON_RECOGNITION_ENABLED", "0")
     assert Settings().person_recognition_enabled is False
+
+
+def test_vision_preempts_reasoning_by_default_and_can_be_disabled(monkeypatch) -> None:
+    monkeypatch.delenv("AVACORE_VISION_PREEMPT_REASONING", raising=False)
+    assert Settings().vision_preempt_reasoning is True
+    monkeypatch.setenv("AVACORE_VISION_PREEMPT_REASONING", "0")
+    assert Settings().vision_preempt_reasoning is False
