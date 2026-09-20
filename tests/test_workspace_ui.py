@@ -13,7 +13,9 @@ def test_workspace_ui_route_and_content():
     assert "focus-field" in content
     assert "Item table" in content
     assert "Source legend" in content
+    assert "Research Questions · Research Orbits" in content
     assert "/debug/workspace" in script
+    assert "/debug/research/questions" in script
     assert "setInterval(refresh,2000)" in script
 
 

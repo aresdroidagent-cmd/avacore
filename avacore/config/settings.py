@@ -418,6 +418,31 @@ class Settings:
         self.task_drive_minimum_interval_seconds = bounded_int("AVA_TASK_DRIVE_MINIMUM_INTERVAL_SECONDS", 3600, 60, 86400 * 30)
         self.task_drive_max_tasks_per_cycle = bounded_int("AVA_TASK_DRIVE_MAX_TASKS_PER_CYCLE", 1, 0, 10)
         self.task_drive_priority_threshold = bounded_float("AVA_TASK_DRIVE_PRIORITY_THRESHOLD", .65, 0.0, 1.0)
+        self.research_drive_enabled = os.environ.get(
+            "AVA_RESEARCH_DRIVE_ENABLED", "0"
+        ).strip() in {"1", "true", "True", "yes", "on"}
+        self.research_threshold = bounded_float("AVA_RESEARCH_THRESHOLD", .65, 0.0, 1.0)
+        self.research_max_open = bounded_int("AVA_RESEARCH_MAX_OPEN", 20, 0, 500)
+        self.research_max_new_per_session = bounded_int(
+            "AVA_RESEARCH_MAX_NEW_PER_SESSION", 3, 0, 100
+        )
+        self.research_dedupe_window_seconds = bounded_int(
+            "AVA_RESEARCH_DEDUPE_WINDOW_SECONDS", 86400, 0, 86400 * 365
+        )
+        self.research_memory_path = Path(os.environ.get(
+            "AVA_RESEARCH_MEMORY_PATH", "./data/state/research_memory.json"
+        )).expanduser()
+        self.orbit_formation_enabled = os.environ.get(
+            "AVA_ORBIT_FORMATION_ENABLED", "0"
+        ).strip() in {"1", "true", "True", "yes", "on"}
+        self.orbit_formation_threshold = bounded_float(
+            "AVA_ORBIT_FORMATION_THRESHOLD", .70, 0.0, 1.0)
+        self.orbit_formation_max_new_per_session = bounded_int(
+            "AVA_ORBIT_FORMATION_MAX_NEW_PER_SESSION", 2, 0, 100)
+        self.orbit_formation_max_open = bounded_int(
+            "AVA_ORBIT_FORMATION_MAX_OPEN", 20, 0, 500)
+        self.orbit_formation_cooldown_seconds = bounded_int(
+            "AVA_ORBIT_FORMATION_COOLDOWN_SECONDS", 3600, 0, 86400 * 365)
         self.question_delivery_enabled = False
         self.question_interaction_timezone = os.environ.get("AVA_QUESTION_INTERACTION_TIMEZONE", "Europe/Zurich").strip()
         self.question_interaction_window_start = os.environ.get("AVA_QUESTION_INTERACTION_WINDOW_START", "19:00").strip()

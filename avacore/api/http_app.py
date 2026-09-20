@@ -80,11 +80,19 @@ from avacore.core.cognitive_workspace import (
     run_post_llm_gate,
     workspace_prompt,
 )
-from avacore.core.continuum import ContinuumService, VisualObservation
+from avacore.core.continuum import CognitiveEvent, ContinuumService, VisualObservation
+from avacore.core.orbit_formation import (
+    EpistemicSalienceEvaluator,
+    OrbitFormationConfig,
+)
 from avacore.core.orbits import OrbitStore
+from avacore.core.research import ResearchDriveConfig, ResearchMemory, ResearchService
+from avacore.core.grounding import build_grounding_context, classify_intent, GroundingIntent, synthetic_orbit
+from avacore.core.response_plan import build_response_plan
 
 _ollama_process = None
 _pending_cognitive_cycles: dict[str, dict] = {}
+_last_grounding_debug: dict = {}
 
 # http_app.py is in avacore/api/http_app.py.
 # Static web files now live in avacore/web/static.
@@ -100,11 +108,33 @@ def continuum_service() -> ContinuumService:
         event_cooldown=settings.vision_event_cooldown,
         known_persons=settings.known_persons,
         orbit_path=settings.orbit_path,
+        research_service=research_service(),
     )
 
 
 def orbit_store() -> OrbitStore:
     return OrbitStore(settings.orbit_path)
+
+
+def research_memory() -> ResearchMemory:
+    return ResearchMemory(settings.research_memory_path)
+
+
+def research_service() -> ResearchService:
+    return ResearchService(research_memory(), orbit_store(), ResearchDriveConfig(
+        enabled=settings.research_drive_enabled, threshold=settings.research_threshold,
+        max_open_questions=settings.research_max_open,
+        max_new_per_session=settings.research_max_new_per_session,
+        dedupe_window_seconds=settings.research_dedupe_window_seconds))
+
+
+def orbit_formation_service() -> EpistemicSalienceEvaluator:
+    return EpistemicSalienceEvaluator(orbit_store(), OrbitFormationConfig(
+        enabled=settings.orbit_formation_enabled,
+        threshold=settings.orbit_formation_threshold,
+        max_new_per_session=settings.orbit_formation_max_new_per_session,
+        max_open=settings.orbit_formation_max_open,
+        cooldown_seconds=settings.orbit_formation_cooldown_seconds))
 
 
 def camera_perception_service(route_decision=None) -> CameraPerceptionService:
@@ -1074,8 +1104,9 @@ def get_hybrid_context(
 
     decision = decide_context(payload_text)
 
+    intent = classify_intent(payload_text)
     rag_hits: list[dict] = []
-    if decision.needs_rag:
+    if decision.needs_rag and intent == GroundingIntent.GENERAL:
         raw_rag_hits = retriever.search(payload_text, top_k=settings.rag_top_k)
         rag_hits = select_rag_hits(raw_rag_hits)
 
@@ -1117,11 +1148,20 @@ def get_hybrid_context(
     self_model = None
     working_memory = None
     active_memory = []
+    grounding = None
+    excluded_orbit_ids: set[str] = set()
     if getattr(settings, "jspace_enabled", False):
         orbits = orbit_store()
         orbits.decay(.88)
-        orbits.react(content=payload_text, related_entities=[])
-        candidates.extend(orbits.candidates())
+        changed_orbits = orbits.react(content=payload_text, related_entities=[])
+        research = research_service()
+        for orbit in changed_orbits:
+            research.from_open_orbit(orbit, event_id=cognitive_cycle_id,
+                                     session_id=session_id)
+        all_orbits = orbits.orbits()
+        excluded_orbit_ids = {orbit.orbit_id for orbit in all_orbits if synthetic_orbit(orbit)}
+        candidates.extend(candidate for candidate in orbits.candidates()
+                          if candidate.get("metadata", {}).get("orbit_id") not in excluded_orbit_ids)
         self_model_path = getattr(settings, "self_model_path", Path("./data/state/self_model.json"))
         self_model = SelfModel.load(self_model_path, name=settings.assistant_name,
                                     system_name=settings.system_name, underlying_model=settings.ollama_model,
@@ -1136,6 +1176,15 @@ def get_hybrid_context(
                            importance=.7, topic=working_memory.current_topic)
         active_memory = working_memory.select(payload_text)
         working_memory.save()
+        grounding = build_grounding_context(
+            payload_text, self_model, orbits=all_orbits,
+            research_questions=research_memory().questions(limit=100),
+            working_memory=active_memory, verified_memories=memories,
+            conversation=history, current_topic=working_memory.current_topic,
+            current_task=working_memory.current_task,
+            open_questions=working_memory.unresolved_questions)
+        grounding.response_plan = build_response_plan(payload_text, grounding)
+        grounding.rag_hit_count = len(rag_hits)
         for memory_item in active_memory:
             candidates.append({"source": "conversation", "kind": memory_item.kind,
                                "content": memory_item.content, "relevance": memory_item.relevance,
@@ -1165,8 +1214,11 @@ def get_hybrid_context(
         snapshot.timing["workspace_pre_ms"] = round((time.perf_counter() - pre_started) * 1000, 3)
         _pending_cognitive_cycles[session_id] = {"snapshot": snapshot, "working_memory": working_memory,
                                                   "self_model": self_model, "total_started": pre_started,
-                                                  "llm_ms": 0.0, "language": language}
-    jspace_context = workspace_prompt(snapshot) if snapshot else ""
+                                                  "llm_ms": 0.0, "language": language,
+                                                  "grounding": grounding}
+    jspace_context = (((grounding.response_plan.prompt() + "\n\n" if grounding and grounding.response_plan else "") +
+                      (grounding.prompt() + "\n\n" if grounding else "")) +
+                      (workspace_prompt(snapshot, excluded_orbit_ids) if snapshot else ""))
 
     messages = [
         {
@@ -1196,13 +1248,20 @@ def finalize_reply(
 
     cycle = _pending_cognitive_cycles.pop(session_id, None)
     if cycle:
-        answer, gate = run_post_llm_gate(answer, cycle["self_model"], language=cycle["language"])
+        global _last_grounding_debug
+        answer, gate = run_post_llm_gate(answer, cycle["self_model"], language=cycle["language"],
+                                        grounding=cycle.get("grounding"),
+                                        response_plan=cycle.get("grounding").response_plan if cycle.get("grounding") else None)
+        if cycle.get("grounding"):
+            _last_grounding_debug = cycle["grounding"].debug(gate)
         snapshot = cycle["snapshot"]
         snapshot.post_gate = gate
         snapshot.timing["llm_ms"] = round(float(cycle.get("llm_ms", 0.0)), 3)
         assimilate_response(snapshot=snapshot, answer=answer, jspace_path=settings.jspace_path,
                             working_memory=cycle["working_memory"], history_limit=settings.workspace_history_limit,
                             workspace_path=settings.workspace_path)
+        orbit_formation_service().observe_cycle(source="conversation", user_text=user_text,
+            snapshot=snapshot, working_memory=cycle["working_memory"], session_id=session_id)
         snapshot.timing["total_ms"] = round((time.perf_counter() - cycle["total_started"]) * 1000, 3)
         # Persist once more so total timing is visible in the completed cycle.
         from avacore.core.cognitive_workspace import _write_workspace
@@ -1469,7 +1528,8 @@ def debug_relations(_: None = Depends(verify_admin_password)) -> dict:
 
 @app.get("/debug/orbits")
 def debug_orbits(_: None = Depends(verify_admin_password)) -> dict:
-    return {"items":[asdict(x) for x in orbit_store().orbits()]}
+    return {**orbit_formation_service().debug(),
+            "items":[asdict(x) for x in orbit_store().orbits()]}
 
 
 @app.get("/debug/tasks")
@@ -1485,6 +1545,29 @@ def debug_questions(_: None = Depends(verify_admin_password)) -> dict:
                 "start":settings.question_interaction_window_start,
                 "end":settings.question_interaction_window_end},
             "items":[asdict(x) for x in orbit_store().questions()]}
+
+
+@app.get("/debug/research")
+def debug_research(_: None = Depends(verify_admin_password)) -> dict:
+    return {"enabled":settings.research_drive_enabled,
+            "threshold":settings.research_threshold, **research_memory().debug()}
+
+
+@app.get("/debug/research/questions")
+def debug_research_questions(_: None = Depends(verify_admin_password)) -> dict:
+    return {"enabled":settings.research_drive_enabled,
+            "items":[asdict(item) for item in research_memory().questions()]}
+
+
+@app.get("/debug/research/orbits")
+def debug_research_orbits(_: None = Depends(verify_admin_password)) -> dict:
+    memory = research_memory()
+    cognitive = {item.orbit_id:item for item in orbit_store().orbits()}
+    return {"enabled":settings.research_drive_enabled,
+            "items":[{**asdict(item),
+                "activation":cognitive.get(item.cognitive_orbit_id).activation
+                    if cognitive.get(item.cognitive_orbit_id) else item.activation}
+                for item in memory.orbits()]}
 
 
 @app.get("/debug/model-router")
@@ -1577,17 +1660,39 @@ def create_orbit_question(payload: QuestionCandidateRequest,
             importance=payload.importance, reason=payload.reason)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="orbit not found") from exc
+    research = None
+    if candidate:
+        research = research_service().from_question_candidate(
+            candidate, orbit_store().get_orbit(candidate.orbit_id), session_id="api:question-candidate")
+        if research.get("question"):
+            continuum_service().assimilate(CognitiveEvent("research", "research_question",
+                research["question"].text, "api:question-candidate",
+                activation=research["question"].priority,
+                salience=research["question"].priority,
+                related_entities=[f"orbit:{research['orbit'].cognitive_orbit_id}"],
+                metadata={"research_question_id":research["question"].question_id}), memory=False)
     return {"created":candidate is not None, "item":asdict(candidate) if candidate else None,
+            "research_status":research.get("status") if research else None,
             "automatic_delivery_enabled":False}
 
 
 @app.post("/debug/task-drive/run")
 def run_task_drive(_: None = Depends(verify_admin_password)) -> dict:
-    tasks = orbit_store().run_task_drive(enabled=settings.task_drive_enabled,
+    store = orbit_store()
+    existing_question_ids = {item.question_id for item in store.questions()}
+    tasks = store.run_task_drive(enabled=settings.task_drive_enabled,
         minimum_interval_seconds=settings.task_drive_minimum_interval_seconds,
         max_tasks=settings.task_drive_max_tasks_per_cycle,
         priority_threshold=settings.task_drive_priority_threshold)
-    return {"enabled":settings.task_drive_enabled, "created":[asdict(x) for x in tasks]}
+    research_results = []
+    for candidate in store.questions():
+        if candidate.question_id not in existing_question_ids:
+            result = research_service().from_question_candidate(
+                candidate, store.get_orbit(candidate.orbit_id), session_id="task-drive")
+            research_results.append({"question_candidate_id":candidate.question_id,
+                                     "status":result["status"]})
+    return {"enabled":settings.task_drive_enabled, "created":[asdict(x) for x in tasks],
+            "research_results":research_results}
 
 
 @app.get("/debug/perception")
@@ -1639,6 +1744,11 @@ async def debug_workspace(_: None = Depends(verify_admin_password)) -> dict:
         settings.workspace_path,
         enabled=getattr(settings, "jspace_enabled", False),
     )
+
+
+@app.get("/debug/grounding")
+async def debug_grounding(_: None = Depends(verify_admin_password)) -> dict:
+    return dict(_last_grounding_debug)
 
 
 @app.get("/debug/workspace/history")

@@ -12,7 +12,7 @@ def test_workspace_debug_routes_are_admin_protected():
 
 def test_reply_builds_one_workspace_context_without_legacy_dynamic_blocks():
     assert "run_workspace_cycle(" in SOURCE
-    assert "workspace_prompt(snapshot)" in SOURCE
+    assert "workspace_prompt(snapshot, excluded_orbit_ids)" in SOURCE
     assert 'if not getattr(settings, "jspace_enabled", False):' in SOURCE
     assert SOURCE.index('if not getattr(settings, "jspace_enabled", False):') < SOURCE.index('parts.append("VERIFIED LONG-TERM MEMORY:')
 

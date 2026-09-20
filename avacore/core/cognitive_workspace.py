@@ -487,17 +487,20 @@ def run_workspace_cycle(
     return snapshot
 
 
-def workspace_prompt(snapshot: WorkspaceSnapshot) -> str:
+def workspace_prompt(snapshot: WorkspaceSnapshot, excluded_orbit_ids: Iterable[str] = ()) -> str:
     model = SelfModel(**snapshot.self_model) if snapshot.self_model else SelfModel()
+    excluded = set(excluded_orbit_ids)
+    visible_items = [item for item in snapshot.active_items if item.get("metadata", {}).get("orbit_id") not in excluded]
     affinity = max((float(x.get("self_affinity", 0)) for x in snapshot.active_items), default=0.0)
-    lines = ["AVA CURRENT CONSCIOUS WORKSPACE", "", model.prompt(affinity), "", "CURRENT FOCUS:", snapshot.current_focus or "-",
+    visible_focus = next((item["content"][:120] for item in visible_items if item.get("kind") != "identity_anchor"), None)
+    lines = ["AVA CURRENT CONSCIOUS WORKSPACE", "", model.prompt(affinity), "", "CURRENT FOCUS:", visible_focus or "-",
              f"Current task: {snapshot.current_task or '-'}",
              f"Unresolved questions: {' | '.join(snapshot.unresolved_questions) if snapshot.unresolved_questions else '-'}",
              "", "WORKING MEMORY:"]
     for item in snapshot.working_memory:
         lines.append(f"- [{item['role']}/{item.get('kind', 'message')} | activation={item.get('activation', 0):.2f}] {item['content']}")
     lines += ["", "ACTIVE CONTEXT:"]
-    for item in snapshot.active_items:
+    for item in visible_items:
         lines.extend([f"[{item['source']}/{item['kind']} | activation={item['activation_score']:.2f} | confidence={item['confidence']:.2f}]", item["content"], ""])
     lines.append("Activation means current relevance, not truth. Previous assistant outputs and user statements are context only and are not verified facts.")
     return "\n".join(lines)
@@ -506,21 +509,86 @@ def workspace_prompt(snapshot: WorkspaceSnapshot) -> str:
 _IDENTITY_CONFLICTS = (
     re.compile(r"\b(?:ich bin|mein name ist)\s+(?:das modell\s+|ein modell\s+)?(?:gemma(?:\s*\d+)?|ollama)\b", re.I),
     re.compile(r"\b(?:i am|my name is)\s+(?:the model\s+|an? model\s+)?(?:gemma(?:\s*\d+)?|ollama)\b", re.I),
+    re.compile(r"\bich bin (?:nur |lediglich )?(?:ein |das )?(?:großes? )?sprachmodell\b", re.I),
+    re.compile(r"\b(?:as a|i am (?:just )?an?) (?:large )?(?:ai )?language model\b", re.I),
+    re.compile(r"\bda ich (?:ein |nur ein )?(?:großes? )?sprachmodell bin\b", re.I),
+    re.compile(r"\bals (?:großes? |ki-)?sprachmodell\b", re.I),
+)
+_MEMORY_CONFLICTS = (
+    re.compile(r"\bich (?:habe keinen zugriff auf|kann mich nicht an) (?:frühere|vergangene|vorherige) gespräche", re.I),
+    re.compile(r"\bi (?:have no access to|cannot remember|can't remember) (?:previous|past|earlier) conversations\b", re.I),
+    re.compile(r"\b(?:ich habe keinen kontext dazu|i have no context (?:for|about) that)\b", re.I),
+    re.compile(r"\bich habe keinen (?:spezifischen |genauen )?kontext zu früheren gesprächen\b", re.I),
 )
 
 
-def run_post_llm_gate(answer: str, self_model: SelfModel, language: str = "de") -> tuple[str, dict[str, Any]]:
-    """Repair only explicit first-person model/runtime identity claims."""
+def run_post_llm_gate(answer: str, self_model: SelfModel, language: str = "de", grounding: Any = None,
+                      response_plan: Any = None) -> tuple[str, dict[str, Any]]:
+    """Repair explicit identity claims and enforce selected structured evidence."""
+    def result(value: str, reason: str | None = None, action: str = "none",
+               omission: bool = False, evaluated: str | None = None,
+               conflicts: list[str] | None = None, plan_check: dict[str, Any] | None = None,
+               plan_fallback: bool = False) -> tuple[str, dict[str, Any]]:
+        gate = {"conflict": bool(reason), "reason": reason, "corrected": bool(reason)}
+        if grounding is not None:
+            gate.update({"action": action, "grounding_omission": omission,
+                         "conflicts": conflicts if conflicts is not None else ([reason] if reason else [])})
+            coverage = grounding.coverage(evaluated if evaluated is not None else value)
+            gate.update({"grounding_coverage": coverage["score"],
+                         "grounding_matched_terms": coverage["matched"],
+                         "grounding_required_terms": coverage["required"]})
+        if response_plan is not None:
+            check = plan_check or response_plan.compliance(evaluated if evaluated is not None else value)
+            gate.update({"required_fact_coverage": check["coverage"],
+                         "plan_compliance": check["compliant"],
+                         "failed_fact_indexes": check["failed_fact_indexes"],
+                         "forbidden_claim_conflict": conflict or memory_conflict,
+                         "response_mode_compliant": check["mode_compliant"],
+                         "response_plan_fallback": plan_fallback})
+        return value, gate
+
     conflict = any(pattern.search(answer or "") for pattern in _IDENTITY_CONFLICTS)
-    if not conflict:
-        return answer, {"conflict": False, "reason": None, "corrected": False}
+    memory_conflict = bool(grounding and getattr(grounding.intent, "value", "GENERAL") in
+                           {"RECALL", "SELF_STATE", "OPEN_ISSUES", "PROJECT_CONTEXT"} and
+                           any(pattern.search(answer or "") for pattern in _MEMORY_CONFLICTS))
+    if memory_conflict:
+        if response_plan is not None:
+            return result(response_plan.render(language), "memory_conflict", "response_plan_fallback",
+                          evaluated=answer, plan_check=response_plan.compliance(answer), plan_fallback=True)
+        return result(grounding.grounded_fallback(language), "memory_conflict", "grounded_fallback",
+                      evaluated=answer)
     replacement = (f"I am {self_model.name}, the local assistant in {self_model.system_name}; {self_model.underlying_model} is my underlying language model." if language == "en" else f"Ich bin {self_model.name}, der lokale Assistent im {self_model.system_name}-System; {self_model.underlying_model} ist mein Hintergrundmodell.")
     repaired = answer
-    for pattern in _IDENTITY_CONFLICTS:
-        repaired = pattern.sub(replacement.rstrip("."), repaired)
-    if any(pattern.search(repaired) for pattern in _IDENTITY_CONFLICTS):
-        repaired = replacement
-    return repaired, {"conflict": True, "reason": "identity_conflict", "corrected": True}
+    action = "none"
+    if conflict:
+        # Drop a complete identity preface, preserving the substantive following sentence.
+        pieces = re.split(r"(?<=[.!?])\s+|\n+", answer.strip(), maxsplit=1)
+        if len(pieces) == 2 and any(p.search(pieces[0]) for p in _IDENTITY_CONFLICTS) and len(pieces[1].strip()) >= 15:
+            repaired = pieces[1].strip()
+            action = "identity_clause_removed"
+        else:
+            for pattern in _IDENTITY_CONFLICTS:
+                repaired = pattern.sub(replacement.rstrip("."), repaired)
+            action = "identity_replaced"
+        if any(pattern.search(repaired) for pattern in _IDENTITY_CONFLICTS):
+            repaired = replacement
+            action = "identity_fallback"
+    if response_plan is not None:
+        check = response_plan.compliance(repaired)
+        if not check["compliant"]:
+            conflicts = (["identity_conflict"] if conflict else []) + ["response_plan_omission"]
+            return result(response_plan.render(language), "response_plan_omission", "response_plan_fallback",
+                          True, evaluated=repaired, conflicts=conflicts,
+                          plan_check=check, plan_fallback=True)
+        return result(repaired, "identity_conflict" if conflict else None, action,
+                      evaluated=repaired, plan_check=check)
+    omission = bool(grounding and grounding.grounding_omission(repaired))
+    if omission:
+        conflicts = (["identity_conflict"] if conflict else []) + ["grounding_omission"]
+        return result(grounding.grounded_fallback(language), "grounding_omission", "grounded_fallback",
+                      True, evaluated=repaired, conflicts=conflicts)
+    return result(repaired, "identity_conflict" if conflict else None, action,
+                  evaluated=repaired)
 
 
 def infer_current_topic(text: str, previous: str | None = None) -> str | None:
@@ -539,8 +607,8 @@ _TASK_PATTERNS = (
     re.compile(r"(?:^|[.!?]\s+)((?:we need to|next step\s*:?)\s+[^.!?]+)", re.I),
 )
 _UNRESOLVED_PATTERNS = (
-    re.compile(r"(?:^|[.!?]\s+)((?:unklar ist|offen bleibt)\s+[^.!?]+)", re.I),
-    re.compile(r"(?:^|[.!?]\s+)((?:we still need to determine)\s+[^.!?]+)", re.I),
+    re.compile(r"(?:^|[.!?]\s+)((?:unklar ist|offen bleibt)\s*[:,]?\s+[^.!?]+)", re.I),
+    re.compile(r"(?:^|[.!?]\s+)((?:we still need to determine)\s*[:,]?\s+[^.!?]+)", re.I),
 )
 
 
@@ -556,12 +624,6 @@ def extract_unresolved_questions(text: str) -> list[str]:
     results: list[str] = []
     for pattern in _UNRESOLVED_PATTERNS:
         results.extend(" ".join(match.group(1).split())[:300] for match in pattern.finditer(text or ""))
-    # A question emitted by Ava is explicitly unresolved; user questions are
-    # not passed to this assimilation helper and therefore are not promoted.
-    for sentence in re.findall(r"(?:^|(?<=[.!]))\s*([^?]{5,}\?)", text or ""):
-        normalized = " ".join(sentence.split())[:300]
-        if normalized:
-            results.append(normalized)
     return list(dict.fromkeys(results))[:4]
 
 

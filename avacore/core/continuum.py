@@ -10,6 +10,7 @@ from typing import Any
 from avacore.core.cognitive_workspace import WorkingMemory, run_workspace_cycle
 from avacore.core.jspace import ContinuumState, clamp, infer_jspace_tags
 from avacore.core.orbits import OrbitStore
+from avacore.core.research import ResearchService
 
 
 def now() -> str:
@@ -106,7 +107,8 @@ class ContinuumService:
                  persons_path: Path | str, *, history_limit: int = 200,
                  confidence_threshold: float = .78, event_cooldown: float = 10.0,
                  known_persons: dict[str, str] | None = None,
-                 orbit_path: Path | str | None = None):
+                 orbit_path: Path | str | None = None,
+                 research_service: ResearchService | None = None):
         self.continuum_path, self.workspace_path = Path(continuum_path), Path(workspace_path)
         self.working_memory_path, self.history_path = Path(working_memory_path), Path(history_path)
         self.persons_path = Path(persons_path)
@@ -115,6 +117,7 @@ class ContinuumService:
         self.event_cooldown = event_cooldown
         self.known_persons = dict(known_persons or {})
         self.orbit_path = Path(orbit_path) if orbit_path else None
+        self.research_service = research_service
 
     @staticmethod
     def _read(path: Path, default: Any) -> Any:
@@ -153,8 +156,39 @@ class ContinuumService:
         orbit_candidates: list[dict[str, Any]] = []
         if self.orbit_path:
             orbit_store = OrbitStore(self.orbit_path)
-            orbit_store.decay(.88)
-            orbit_store.react(content=event.content, related_entities=event.related_entities)
+            changed_orbits = []
+            if event.source != "research":
+                orbit_store.decay(.88)
+                changed_orbits = orbit_store.react(content=event.content,
+                                                    related_entities=event.related_entities)
+            if self.research_service:
+                for orbit in changed_orbits:
+                    result = self.research_service.from_open_orbit(
+                        orbit, event_id=event.id, session_id=event.session_id)
+                    question = result.get("question")
+                    if question:
+                        state = ContinuumState.load(self.continuum_path)
+                        state.inject("research", "research_question", question.text,
+                            infer_jspace_tags(question.topic), activation_boost=question.priority,
+                            priority=question.priority, persistence=.8, confidence=question.confidence,
+                            relevance=question.priority, recency=1.0, continuity=.8,
+                            metadata={"research_question_id":question.question_id,
+                                "origin":question.origin, "trigger":question.trigger,
+                                "source_event_ids":question.source_event_ids,
+                                "source_orbit_ids":question.source_orbit_ids})
+                        state.save(self.continuum_path)
+                        research_event = CognitiveEvent("research",
+                            "research_question" if result["status"] == "created"
+                            else "research_question_reactivated",
+                            question.text, event.session_id, cycle_id=event.cycle_id,
+                            activation=question.priority, salience=question.priority,
+                            confidence=question.confidence,
+                            related_entities=[f"orbit:{x}" for x in question.source_orbit_ids],
+                            metadata={"research_question_id":question.question_id,
+                                "trigger":question.trigger, "source_event_id":event.id})
+                        research_history = self.events() + [asdict(research_event)]
+                        self._write(self.history_path, {"version":1,
+                            "events":research_history[-self.history_limit:]})
             orbit_candidates = orbit_store.candidates()
         # Use the Phase-2 activation/competition path; this does not invoke an
         # LLM and does not force the event into the selected subset.

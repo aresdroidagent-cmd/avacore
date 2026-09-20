@@ -159,6 +159,18 @@ def _configure_reply_integration(monkeypatch, tmp_path, answer):
     monkeypatch.setattr(http_app.settings, "jspace_path", tmp_path / "jspace.json")
     monkeypatch.setattr(http_app.settings, "workspace_path", tmp_path / "workspace.json")
     monkeypatch.setattr(http_app.settings, "working_memory_path", tmp_path / "working.json")
+    monkeypatch.setattr(http_app.settings, "orbit_path", tmp_path / "orbits.json")
+    monkeypatch.setattr(http_app.settings, "research_memory_path", tmp_path / "research.json")
+    monkeypatch.setattr(http_app.settings, "research_drive_enabled", False)
+    monkeypatch.setattr(http_app.settings, "research_threshold", .65)
+    monkeypatch.setattr(http_app.settings, "research_max_open", 20)
+    monkeypatch.setattr(http_app.settings, "research_max_new_per_session", 3)
+    monkeypatch.setattr(http_app.settings, "research_dedupe_window_seconds", 86400)
+    monkeypatch.setattr(http_app.settings, "orbit_formation_enabled", False)
+    monkeypatch.setattr(http_app.settings, "orbit_formation_threshold", .70)
+    monkeypatch.setattr(http_app.settings, "orbit_formation_max_new_per_session", 2)
+    monkeypatch.setattr(http_app.settings, "orbit_formation_max_open", 20)
+    monkeypatch.setattr(http_app.settings, "orbit_formation_cooldown_seconds", 3600)
     monkeypatch.setattr(http_app.settings, "self_model_path", tmp_path / "self.json")
     monkeypatch.setattr(http_app.settings, "web_admin_password", "test-secret")
     monkeypatch.setattr(http_app.settings, "assistant_name", "Ava")
@@ -196,7 +208,9 @@ def test_full_reply_identity_conflict_cycle_and_allowed_background_model(monkeyp
     assert debug["pre_workspace"] and debug["post_workspace"] and debug["completed_at"]
     assert debug["self_model"]["name"] == "Ava" and debug["self_model"]["activation"] >= .45
     assert any(x["kind"] == "identity_anchor" and x["self_affinity"] >= .45 for x in debug["active_items"])
-    assert debug["post_gate"] == {"conflict": True, "reason": "identity_conflict", "corrected": True}
+    assert debug["post_gate"]["conflict"] is True
+    assert debug["post_gate"]["reason"] == "identity_conflict"
+    assert debug["post_gate"]["corrected"] is True
     memory = WorkingMemory(tmp_path / "working.json", session_id="web:identity")
     assert not any(item.role == "assistant" and item.content.startswith("Ich bin Gemma") for item in memory.items)
 
@@ -217,6 +231,106 @@ def test_normal_reply_fast_path_has_exactly_one_reasoning_call(monkeypatch, tmp_
     assert http_app.model_router.last_decision.worker_id == "ollama_reasoning"
     debug = json.loads((tmp_path / "workspace.json").read_text())["current"]
     assert set(debug["timing"]) >= {"workspace_pre_ms", "llm_ms", "workspace_post_ms", "total_ms"}
+
+
+def test_reply_grounding_omission_uses_orbit_with_one_model_call(monkeypatch, tmp_path):
+    from avacore.core.orbits import OrbitStore
+
+    http_app, chat = _configure_reply_integration(
+        monkeypatch, tmp_path, "Wir hatten über Hardware und lokale LLMs gesprochen.")
+    orbit = OrbitStore(tmp_path / "orbits.json").create_orbit(
+        "Long-term coherence / orbit reactivation",
+        "Reliable reactivation of relevant Cognitive Orbits", importance=.9)
+    response = _run_reply(http_app, "Was hatten wir bei AvaCore noch offen?", chat_id="grounded")
+    assert chat.call_count == 1
+    assert "Long-term coherence" in response.reply
+    debug = http_app._last_grounding_debug
+    assert debug["answer_anchor_ids"] == [orbit.orbit_id]
+    assert debug["grounding_omission"] is True
+    assert debug["post_gate_action"] == "response_plan_fallback"
+
+
+def test_reply_excludes_synthetic_orbit_from_grounding_prompt(monkeypatch, tmp_path):
+    from avacore.core.orbits import OrbitStore
+
+    http_app, chat = _configure_reply_integration(monkeypatch, tmp_path, "Eine technische Frage zu Cognitive Orbits.")
+    orbits = OrbitStore(tmp_path / "orbits.json")
+    orbits.create_orbit("Person recognition robustness", "Old acceptance test concern",
+                        metadata={"test": "phase4_acceptance"})
+    orbits.create_orbit("Cognitive Orbits", "Reliable reactivation of relevant topics")
+    _run_reply(http_app, "Wenn du mir eine technische Frage stellen dürftest, welche wäre das?", chat_id="filtered")
+    prompt = chat.call_args.args[0][0]["content"]
+    assert "Person recognition robustness" not in prompt
+    assert "Cognitive Orbits" in prompt
+    assert chat.call_count == 1
+
+
+def test_reply_identity_cleanup_and_grounding_fallback_still_use_one_model_call(monkeypatch, tmp_path):
+    from avacore.core.orbits import OrbitStore
+
+    raw = ("Als großes Sprachmodell habe ich keine persönlichen Präferenzen.\n"
+           "Ich kann Fragen zu verschiedenen technischen Themen stellen.")
+    http_app, chat = _configure_reply_integration(monkeypatch, tmp_path, raw)
+    OrbitStore(tmp_path / "orbits.json").create_orbit(
+        "Long-term coherence / orbit reactivation", "Reliable reactivation of important Cognitive Orbits")
+    response = _run_reply(http_app, "Wenn du mir eine technische Frage stellen dürftest, welche wäre das?",
+                          chat_id="double-conflict")
+    assert chat.call_count == 1
+    assert response.reply.startswith("Eine technische Frage aus meinem aktuellen AvaCore-Zustand betrifft:")
+    assert http_app._last_grounding_debug["post_gate_conflicts"] == ["identity_conflict", "response_plan_omission"]
+    assert http_app._last_grounding_debug["post_gate_action"] == "response_plan_fallback"
+
+
+def test_normal_reply_observes_changed_orbit_without_extra_model_call(monkeypatch, tmp_path):
+    from avacore.core.orbits import OrbitStore
+    from avacore.core.research import ResearchMemory
+
+    http_app, chat = _configure_reply_integration(monkeypatch, tmp_path, "Eine Antwort.")
+    monkeypatch.setattr(http_app.settings, "research_drive_enabled", True)
+    monkeypatch.setattr(http_app.settings, "research_threshold", .25)
+    orbits = OrbitStore(tmp_path / "orbits.json")
+    orbit = orbits.create_orbit("Identity uncertainty", "Unresolved identity uncertainty",
+        importance=.9, metadata={"uncertainty":.9})
+
+    response = _run_reply(http_app, "Identity uncertainty remains unresolved.", chat_id="research")
+
+    questions = ResearchMemory(tmp_path / "research.json").questions()
+    assert response.reply == "Eine Antwort."
+    assert chat.call_count == 1
+    assert len(questions) == 1
+    assert questions[0].source_orbit_ids == [orbit.orbit_id]
+
+
+def test_normal_reply_with_research_disabled_remains_unchanged(monkeypatch, tmp_path):
+    from avacore.core.orbits import OrbitStore
+    from avacore.core.research import ResearchMemory
+
+    http_app, chat = _configure_reply_integration(monkeypatch, tmp_path, "Eine Antwort.")
+    OrbitStore(tmp_path / "orbits.json").create_orbit(
+        "Identity uncertainty", "Unresolved identity uncertainty", importance=.9)
+
+    response = _run_reply(http_app, "Identity uncertainty remains unresolved.", chat_id="disabled")
+
+    assert response.reply == "Eine Antwort."
+    assert chat.call_count == 1
+    assert ResearchMemory(tmp_path / "research.json").questions() == []
+
+
+def test_normal_reply_forms_salient_orbit_without_extra_model_call(monkeypatch, tmp_path):
+    from avacore.core.orbits import OrbitStore
+
+    http_app, chat = _configure_reply_integration(monkeypatch, tmp_path, "Das nehme ich als offenen Punkt auf.")
+    monkeypatch.setattr(http_app.settings, "orbit_formation_enabled", True)
+
+    response = _run_reply(http_app,
+        "Ich bin noch nicht überzeugt, dass dein Orbit-System langfristig relevante Themen zuverlässig aufgreift.",
+        chat_id="formation")
+
+    formed = OrbitStore(tmp_path / "orbits.json").orbits()
+    assert response.reply == "Das nehme ich als offenen Punkt auf."
+    assert chat.call_count == 1
+    assert len(formed) == 1
+    assert formed[0].metadata["formation_reason"] == "EXPLICIT_CONCERN"
 
 
 def test_reply_conversation_continuity_isolated_between_sessions(monkeypatch, tmp_path):
