@@ -41,6 +41,14 @@ def test_see_selects_configured_vision_worker():
     assert decision.model_name == "configured-vision"
 
 
+def test_visual_translation_uses_dedicated_dialogue_worker():
+    router = ModelRouter(default_workers(settings()))
+    decision = router.route(profile_for_operation("vision.translation"))
+    assert decision.worker_id == "ollama_translation"
+    assert decision.required_capability == "dialogue"
+    assert decision.model_name == "configured-dialogue"
+
+
 def test_reply_selects_configured_ollama_reasoning_worker():
     decision = router().route(profile_for_operation("reply"))
     assert decision.required_capability == "reasoning"
@@ -121,6 +129,7 @@ def test_worker_names_come_from_settings():
     workers = default_workers(settings(ollama_model="a", vision_model="b"))
     assert {worker.worker_id:worker.model_name for worker in workers} == {
         "ollama_reasoning":"a", "smolvlm_vision":"b",
+        "ollama_translation":"a",
         "coding_placeholder":None, "review_placeholder":None,
     }
 
@@ -145,7 +154,7 @@ def test_camera_api_records_vision_and_structured_no_model_routes(monkeypatch):
             return PerceptionResult("now", "now", "frame", "scene", [], [], [],
                                     reason=kwargs["reason"])
 
-    monkeypatch.setattr(http_app, "camera_perception_service", lambda _decision=None: Service())
+    monkeypatch.setattr(http_app, "camera_perception_service", lambda _decision=None, _translation=None: Service())
     monkeypatch.setattr(http_app.settings, "vision_preempt_reasoning", True)
     http_app.request_camera_perception(http_app.CameraPerceptionRequest(
         reason="see_command", include_scene=True), None)

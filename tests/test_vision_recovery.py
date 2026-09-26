@@ -90,7 +90,8 @@ def test_generate_oom_is_short_and_next_request_reuses_client(monkeypatch, tmp_p
     assert describe._client is client
 
 
-def test_german_camera_prompt_requests_german_without_identity():
+def test_camera_prompt_is_english_even_for_german_presentation():
     prompt = describe.camera_scene_prompt("de")
-    assert "Antworte auf Deutsch" in prompt
-    assert "Identifiziere die Person nicht" in prompt
+    assert "Return the description in English" in prompt
+    assert "Do not identify or name people" in prompt
+    assert "Deutsch" not in prompt

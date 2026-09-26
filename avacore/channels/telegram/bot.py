@@ -2247,12 +2247,15 @@ async def active_camera_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if error:
         await update.effective_message.reply_text(error); return
     description = clean_camera_description(data.get("scene_description") or "")
-    known = data.get("identities_resolved") or []
-    unknown_count = sum(1 for x in data.get("persons", []) if not x.get("person_id"))
+    unknown_count = int(data.get("current_scene_unknown_count",
+                        sum(1 for x in data.get("persons", []) if not x.get("person_id"))))
     structured = []
-    if known: structured.append("Recognized: " + ", ".join(known))
-    if unknown_count: structured.append(f"Unknown persons: {unknown_count}")
-    caption = "Aktuelle Ava-Wahrnehmung\n\n" + (description or f"Persons visible: {len(data.get('persons') or [])}")
+    if unknown_count:
+        structured.append(("Unbekannte Personen: " if language == "de" else "Unknown persons: ") + str(unknown_count))
+    heading = "Aktuelle Ava-Wahrnehmung" if language == "de" else "Current Ava perception"
+    empty = ((f"Sichtbare Personen: {len(data.get('persons') or [])}") if language == "de" else
+             f"Persons visible: {len(data.get('persons') or [])}")
+    caption = heading + "\n\n" + (description or empty)
     if structured: caption += "\n" + "\n".join(structured)
     image_path = Path(data.get("image_path") or "")
     if image_path.exists():

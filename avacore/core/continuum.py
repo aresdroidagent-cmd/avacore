@@ -93,6 +93,8 @@ class IdentityResolver:
         confidence = clamp(evidence.get("confidence", 0))
         if candidate in self.known_persons and confidence >= self.threshold:
             return candidate, True
+        if evidence.get("require_fresh_identity"):
+            return f"unknown_person:{track_id or 'untracked'}", False
         prior = tracks.get(track_id, {}).get("person_id") if track_id else None
         if prior:
             return str(prior), False
@@ -322,9 +324,14 @@ class ContinuumService:
                                     self.confidence_threshold)
         previous = {key for key, value in people.items() if value.current_presence}
         current: set[str] = set()
+        scene_person_ids: set[str] = set()
         related: list[str] = []
         relation_events: list[CognitiveEvent] = []
         for index, evidence in enumerate(observation.persons):
+            if evidence.get("binding_status") == "anonymous_visual":
+                scene_person_ids.add(str(evidence.get("scene_person_id") or
+                                         f"scene_person:{observation.timestamp}:{index}"))
+                continue
             confidence = clamp(evidence.get("confidence", 0))
             track_id = str(evidence.get("track_id") or f"frame_person_{index}")
             previous_person = tracks.get(track_id, {}).get("person_id")
@@ -372,7 +379,8 @@ class ContinuumService:
                                       confidence, "vision", observation.timestamp)
         events: list[CognitiveEvent] = []
         signature = {"scene": observation.scene_description.strip().casefold(),
-                     "persons": sorted(current), "objects": sorted(set(observation.objects))}
+                     "persons": sorted(current | scene_person_ids),
+                     "objects": sorted(set(observation.objects))}
         prior = self._read(self.persons_path, {}).get("last_signature")
         changed = signature != prior
         if changed:

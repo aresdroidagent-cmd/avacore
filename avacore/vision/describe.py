@@ -66,31 +66,30 @@ ARTWORK_PROMPT = (
 
 CAMERA_SCENE_PROMPT = (
     "You are looking at a live indoor camera image. "
-    "Describe only the visible real-world scene. "
-    "Ignore all timestamps, camera names, dates, numbers, labels, on-screen overlays and text in the image. "
-    "Do not describe any text overlay. "
-    "Do not invent a story, a diagram, a game, an account, a document, or a process. "
-    "Focus only on visible objects such as room, sofa, door, furniture, person, light, walls, windows and devices. "
-    "If a person is visible, say only that a person is visible and roughly where they are. "
-    "Do not identify the person. "
-    "If the scene is unclear, say: 'The scene is not clearly recognizable.' "
-    "Answer in one short factual sentence."
-)
-
-CAMERA_SCENE_PROMPT_DE = (
-    "Du siehst ein aktuelles Bild einer Innenraumkamera. "
-    "Beschreibe ausschließlich die sichtbare reale Szene. "
-    "Ignoriere Zeitstempel, Kameranamen, Daten, Zahlen, Beschriftungen, Einblendungen und Text im Bild. "
-    "Erfinde keine Geschichte, kein Diagramm, Spiel, Konto, Dokument oder Verfahren. "
-    "Konzentriere dich auf sichtbare Dinge wie Raum, Sofa, Tür, Möbel, Personen, Licht, Wände, Fenster und Geräte. "
-    "Wenn eine Person sichtbar ist, sage nur, dass eine Person sichtbar ist und ungefähr wo sie sich befindet. "
-    "Identifiziere die Person nicht. Wenn die Szene unklar ist, sage: 'Die Szene ist nicht klar erkennbar.' "
-    "Antworte auf Deutsch in einem kurzen sachlichen Satz."
+    "Describe only what is visibly present in the image. Be concrete and concise. "
+    "Report people and their visible actions, relevant objects, spatial relationships, "
+    "the visible environment, and notable visible changes or conditions. "
+    "Ignore timestamps, camera names, dates, labels, overlays, and other on-screen text. "
+    "Do not identify or name people, and do not infer identity from appearance. "
+    "Do not infer hidden intentions, emotions, occupations, relationships, or events "
+    "that are not directly visible. If something is uncertain, describe it as uncertain. "
+    "Answer in one short factual sentence. Return the description in English."
 )
 
 
 def camera_scene_prompt(language: str = "en") -> str:
-    return CAMERA_SCENE_PROMPT_DE if language.strip().lower().startswith("de") else CAMERA_SCENE_PROMPT
+    """Camera semantics are always produced in English; language is presentation-only."""
+    return CAMERA_SCENE_PROMPT
+
+
+def unload_vision_worker() -> bool:
+    """Release the resident VLM before a sequential GPU text-worker stage."""
+    global _client
+    with _client_lock:
+        was_loaded = _client is not None
+        _client = None
+    _release_cuda_cache()
+    return was_loaded
 
 
 def _release_cuda_cache() -> None:

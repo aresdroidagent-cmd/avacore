@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 import logging
 import re
+import uuid
 from typing import Any, Callable
 
 import cv2
@@ -39,6 +40,17 @@ def _iou(first: list[int], second: list[int]) -> float:
     intersection = max(0, right - left) * max(0, bottom - top)
     union = aw * ah + bw * bh - intersection
     return intersection / union if union else 0.0
+
+
+def _track_continuity_score(first: list[int], second: list[int]) -> float:
+    """Bounded spatial continuity from overlap or normalized center proximity."""
+    overlap = _iou(first, second)
+    ax, ay, aw, ah = first; bx, by, bw, bh = second
+    scale_x, scale_y = max(1.0, float(max(aw, bw))), max(1.0, float(max(ah, bh)))
+    dx = abs((ax + aw / 2) - (bx + bw / 2)) / scale_x
+    dy = abs((ay + ah / 2) - (by + bh / 2)) / scale_y
+    proximity = max(0.0, 1.0 - ((dx * dx + dy * dy) ** .5))
+    return round(max(overlap, proximity), 3)
 
 
 def detect_people(image_path: Path) -> list[list[int]]:
@@ -75,6 +87,162 @@ class PerceptionResult:
     scene_description_at: str | None = None
     reused: bool = False
     reason: str = "request"
+    description_en: str = ""
+    description_de: str = ""
+    vlm_prompt_language: str = "en"
+    vlm_output_language: str = "en"
+    presentation_language: str = "en"
+    vision_model_calls: int = 0
+    translation_model_calls: int = 0
+    reasoning_model_calls: int = 0
+    identity_source: str = "local_recognition"
+    frame_id: str = ""
+    camera_id: str = "camera_primary"
+    identity_enriched: bool = False
+    identity_binding_reason: str = "no_confirmed_local_identity"
+    final_description: str = ""
+    scene_person_count: int = 0
+    canonical_person_count: int = 0
+    objects: list[str] = field(default_factory=list)
+    relations: list[dict[str, Any]] = field(default_factory=list)
+    last_scene_observation: dict[str, Any] = field(default_factory=dict)
+    object_details: list[dict[str, Any]] = field(default_factory=list)
+    track_handover_detected: bool = False
+    track_handover_from: str | None = None
+    track_handover_to: str | None = None
+    track_handover_reason: str | None = None
+    track_continuity_score: float = 0.0
+    current_scene_unknown_count: int = 0
+    historical_unknown_count: int = 0
+
+
+_VISIBLE_OBJECT_PATTERNS = {
+    "phone": r"\b(?:phone|smartphone|mobile phone)\b",
+    "sofa": r"\b(?:sofa|couch)\b",
+    "coffee_cup": r"\b(?:coffee\s+cup|coffee\s+mug|cup|mug)\b",
+    "papers": r"\b(?:paper|papers|documents?)\b",
+    "table": r"\b(?:table|desk)\b",
+    "floor": r"\b(?:floor|ground)\b",
+}
+
+
+def _deduplicate_scene_persons(persons: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep one scene person per canonical identity and distinct anonymous tracks."""
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for person in persons:
+        key = str(person.get("person_entity_id") or f"track:{person.get('track_id')}")
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(person)
+    return result
+
+
+def _compose_single_person_description(description: str, display_name: str, *,
+                                       language: str) -> tuple[str, str]:
+    """Bind a canonical subject to its action without gendering the identity."""
+    text = " ".join((description or "").split()).strip()
+    if not text:
+        visible = f"{display_name} ist sichtbar." if language == "de" else f"{display_name} is visible."
+        return visible, "single_fresh_identity_no_description"
+    if language == "de":
+        match = re.match(r"^(?:ein|eine|einen|der|die)\s+(?:Person|Frau|Mann)\s+(.+)$",
+                         text, flags=re.IGNORECASE)
+        if not match:
+            return f"{display_name} ist sichtbar. {text}", "single_fresh_identity_conservative"
+        action = match.group(1)
+        if re.search(r"\b(?:er|sie|ihm|ihr|seine?|ihre?)\b", action, flags=re.IGNORECASE):
+            action = re.sub(r"\b(während|wobei|obwohl|als)\s+(?:er|sie)\b",
+                            r"\1 die Person", action, flags=re.IGNORECASE)
+            return (f"{display_name} ist sichtbar. Die Person {action}",
+                    "single_fresh_identity_pronoun_safe")
+        return f"{display_name} {action}", "single_fresh_identity_action_bound"
+    match = re.match(r"^(?:(?:a|the)\s+)?(?:person|man|woman|individual)\s+(.+)$",
+                     text, flags=re.IGNORECASE)
+    if not match:
+        return f"{display_name} is visible. {text}", "single_fresh_identity_conservative"
+    action = match.group(1)
+    if re.search(r"\b(?:he|she|him|her|his|hers)\b", action, flags=re.IGNORECASE):
+        action = re.sub(r"\b(while|whereas|although|as)\s+(?:he|she)\b",
+                        r"\1 the person", action, flags=re.IGNORECASE)
+        return (f"{display_name} is visible. The person {action}",
+                "single_fresh_identity_pronoun_safe")
+    return f"{display_name} {action}", "single_fresh_identity_action_bound"
+
+
+def _anonymous_scene_person(description_en: str, *, frame_id: str,
+                            camera_id: str) -> dict[str, Any] | None:
+    if not re.search(r"\b(?:person|man|woman|individual)\b", description_en, flags=re.IGNORECASE):
+        return None
+    scene_person_id = f"scene_person:{frame_id}:1"
+    return {"scene_person_id":scene_person_id, "track_id":scene_person_id,
+            "person_id":None, "person_entity_id":None, "display_name":None,
+            "confidence":.5, "recognition_confidence":None,
+            "identity_status":"anonymous_visual", "binding_status":"anonymous_visual",
+            "identity_source":"none", "frame_id":frame_id, "camera_id":camera_id,
+            "sensor_id":camera_id, "require_fresh_identity":True}
+
+
+def _extract_scene_structure(description_en: str, persons: list[dict[str, Any]], *,
+                             frame_id: str, camera_id: str
+                             ) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Extract a tiny bounded scene projection only from explicit VLM wording."""
+    text = " ".join((description_en or "").casefold().split())
+    ambiguous_match = re.search(
+        r"\b(?:cup|mug|glass|bottle)(?:\s*(?:/|\bor\b)\s*(?:cup|mug|glass|bottle)){1,3}\b",
+        text)
+    objects = [name for name, pattern in _VISIBLE_OBJECT_PATTERNS.items()
+               if re.search(pattern, text) and not (name == "coffee_cup" and ambiguous_match)][:12]
+    object_details: list[dict[str, Any]] = []
+    if ambiguous_match:
+        raw_label = ambiguous_match.group(0)
+        candidates = []
+        for token in re.findall(r"cup|mug|glass|bottle", raw_label):
+            label = "coffee_cup" if token in {"cup", "mug"} else token
+            if label not in candidates:
+                candidates.append(label)
+        objects.insert(0, "drink_container")
+        object_details.append({"object_id":"drink_container", "raw_label":raw_label,
+            "normalized_label":"drink_container", "candidate_labels":candidates[:4],
+            "uncertain":True})
+    for object_id in objects:
+        if object_id != "drink_container":
+            object_details.append({"object_id":object_id, "raw_label":object_id,
+                "normalized_label":object_id, "candidate_labels":[object_id], "uncertain":False})
+    relations: list[dict[str, Any]] = []
+    sole_person = persons[0] if len(persons) == 1 else None
+    mentions_person = bool(re.search(r"\b(?:person|man|woman|individual)\b", text))
+    person_subject = ((sole_person or {}).get("person_entity_id") or
+                      (f"scene_person:{frame_id}:1" if mentions_person and len(persons) <= 1 else None))
+    def add(subject: str, predicate: str, object_id: str, confidence: float = .85) -> None:
+        relations.append({"subject_id":subject, "predicate":predicate, "object_id":object_id,
+                          "confidence":confidence, "source":"vlm_visible_relation",
+                          "frame_id":frame_id, "camera_id":camera_id})
+    if (person_subject and "sofa" in objects and
+            re.search(r"\b(?:person|man|woman|individual)\b[^.]{0,100}\b(?:next to|near|beside)\b[^.]{0,40}\b(?:sofa|couch)\b", text)):
+        add(person_subject, "NEAR", "sofa", .8)
+    if (person_subject and "sofa" in objects and
+            re.search(r"\b(?:person|man|woman|individual)\b[^.]{0,80}\b(?:sitting|seated|sits)\s+on\b[^.]{0,30}\b(?:a\s+|the\s+)?(?:sofa|couch)\b", text)):
+        add(person_subject, "SITTING_ON", "sofa")
+    if (person_subject and "phone" in objects and
+            re.search(r"\b(?:person|man|woman|individual)\b[^.]{0,60}\b(?:holding|holds)\b[^.]{0,25}\b(?:a\s+|the\s+)?(?:phone|smartphone|mobile phone)\b", text)):
+        add(person_subject, "HOLDING", "phone")
+    for object_id, object_pattern in (("coffee_cup", r"(?:coffee\s+cup|coffee\s+mug|cup|mug)"),
+                                      ("papers", r"(?:paper|papers|documents?)")):
+        if object_id not in objects:
+            continue
+        for surface_id, surface_pattern in (("table", r"(?:table|desk)"), ("floor", r"(?:floor|ground)")):
+            if surface_id in objects and re.search(
+                    rf"\b{object_pattern}\b[^.]{{0,45}}\b(?:is|are|lies?|rests?|sits?|stands?)?\s*on\b[^.]{{0,25}}\b(?:the\s+)?{surface_pattern}\b", text):
+                add(object_id, "ON", surface_id)
+    if ambiguous_match:
+        for surface_id, surface_pattern in (("table", r"(?:table|desk)"), ("floor", r"(?:floor|ground)")):
+            if surface_id in objects and re.search(
+                    rf"{re.escape(ambiguous_match.group(0))}[^.]{{0,30}}\bon\b[^.]{{0,20}}\b(?:the\s+)?{surface_pattern}\b",
+                    text):
+                add("drink_container", "ON", surface_id)
+    return objects[:12], relations[:12], object_details[:12]
 
 
 class CameraPerceptionService:
@@ -85,12 +253,16 @@ class CameraPerceptionService:
                  detector: Callable[[Path], list[list[int]]] = detect_people,
                  recognizer: Callable[..., Any] = recognize_face_image,
                  describer: Callable[..., str] = describe_image_with_smolvlm,
+                 translator: Callable[[str], str] | None = None,
                  vision_preflight: Callable[[], Any] | None = None,
-                 vision_lease: Callable[[], Any] | None = None):
+                 vision_lease: Callable[[], Any] | None = None,
+                 translation_lease: Callable[[], Any] | None = None):
         self.settings, self.continuum = settings, continuum
         self.capture, self.detector, self.recognizer, self.describer = capture, detector, recognizer, describer
         self.vision_preflight = vision_preflight
         self.vision_lease = vision_lease
+        self.translator = translator
+        self.translation_lease = translation_lease
 
     def _retire_legacy_singleton(self) -> dict[str, Any]:
         graph = self.continuum._graph()
@@ -128,6 +300,8 @@ class CameraPerceptionService:
             "identity_resolved": value.get("person_id") if value.get("person_id") in self.settings.known_persons else None}
             for key, value in graph.get("tracks", {}).items()
             if key.startswith("camera_primary:") and value.get("present")]
+        perception["description_en_excerpt"] = str(perception.get("description_en") or "")[:240]
+        perception["description_de_excerpt"] = str(perception.get("description_de") or "")[:240]
         return perception
 
     def request(self, *, reason: str, force: bool = False, include_scene: bool = False,
@@ -139,6 +313,8 @@ class CameraPerceptionService:
         if not self.settings.camera_enabled or not self.settings.camera_ip:
             raise RuntimeError("camera perception not configured")
         captured_at = _utc_now()
+        frame_id = f"frame_{uuid.uuid4().hex}"
+        camera_id = "camera_primary"
         url = build_rtsp_url(self.settings.camera_user, self.settings.camera_password,
                              self.settings.camera_ip, self.settings.camera_rtsp_path)
         image_path = self.capture(url=url, output_dir=self.settings.camera_cache_dir,
@@ -180,8 +356,9 @@ class CameraPerceptionService:
                         model_name=self.settings.identity_model, device=self.settings.identity_device,
                         threshold=self.settings.person_confidence_threshold, margin_threshold=self.settings.identity_margin,
                         top_k=self.settings.identity_top_k, min_roger_votes=self.settings.identity_min_roger_votes)
-                    person_id = decision.identity if decision.identity in self.settings.known_persons else None
                     confidence = decision.confidence
+                    person_id = (decision.identity if decision.identity in self.settings.known_persons and
+                                 confidence >= self.settings.person_confidence_threshold else None)
                     recognition.update({"face_detected":bool(getattr(decision, "face_path", None)),
                         "recognition_candidate":getattr(decision, "top_label", decision.identity),
                         "recognition_confidence":decision.confidence,
@@ -192,10 +369,57 @@ class CameraPerceptionService:
                         resolved_in_frame.add(person_id)
                 except Exception as exc:
                     recognition["recognition_reason"] = f"{type(exc).__name__}: {str(exc)[:160]}"
-            evidence.append({"track_id":track_id, "person_id":person_id, "confidence":confidence,
+            display_name = self.settings.known_persons.get(person_id) if person_id else None
+            evidence.append({"track_id":track_id, "person_id":person_id,
+                             "person_entity_id":f"person:{person_id}" if person_id else None,
+                             "display_name":display_name, "confidence":confidence,
+                             "recognition_confidence":confidence,
+                             "identity_status":"confirmed_local" if person_id else "unresolved",
+                             "binding_status":"confirmed_local" if person_id else "unbound",
+                             "require_fresh_identity":bool(include_scene),
+                             "frame_id":frame_id, "camera_id":camera_id,
                              "location":"camera_view", "bounding_box":box,
                              "sensor_id":"camera_primary", "recognition":recognition})
+        track_handover_detected = False
+        track_handover_from = track_handover_to = track_handover_reason = None
+        track_continuity_score = 0.0
+        if len(boxes) == len(evidence) == 1 and evidence[0].get("person_entity_id"):
+            current_track = evidence[0]["track_id"]
+            current_box = evidence[0]["bounding_box"]
+            freshness_window = min(10.0, max(1.0, float(self.settings.perception_freshness_seconds)))
+            candidates = []
+            for old_track, old in active.items():
+                old_person = str(old.get("person_id") or "")
+                age = _age_seconds(old.get("last_seen"))
+                old_box = old.get("bounding_box") or []
+                if (old_track == current_track or old_track in used or
+                        not old_person.startswith("unknown_person:") or
+                        old.get("sensor_id", camera_id) != camera_id or
+                        age is None or age > freshness_window or len(old_box) != 4):
+                    continue
+                score = _track_continuity_score(old_box, current_box)
+                if score >= .35:
+                    candidates.append((score, old_track))
+            if candidates:
+                track_continuity_score, track_handover_from = max(candidates)
+                track_handover_to = current_track
+                track_handover_reason = "single_current_person_recent_spatial_unknown_to_canonical"
+                track_handover_detected = True
+                tracks[track_handover_from]["present"] = False
+                tracks[track_handover_from]["handover_to"] = track_handover_to
+                tracks[track_handover_from]["retired_reason"] = "track_handover"
+                self.continuum._write(self.continuum.persons_path, graph)
         description = ""
+        description_en = ""
+        description_de = ""
+        vision_model_calls = 0
+        translation_model_calls = 0
+        identity_enriched = False
+        identity_binding_reason = "no_visible_local_person" if not evidence else "no_confirmed_local_identity"
+        objects: list[str] = []
+        relations: list[dict[str, Any]] = []
+        object_details: list[dict[str, Any]] = []
+        scene_persons = _deduplicate_scene_persons(evidence)
         description_at = None
         if include_scene and self.settings.vision_enabled:
             lease = self.vision_lease() if self.vision_lease is not None else nullcontext()
@@ -207,28 +431,87 @@ class CameraPerceptionService:
                         # Compatibility hook for callers predating the central
                         # ResourceCoordinator.
                         _logger.warning("Vision resource preflight failed", exc_info=True)
-                description = self.describer(
-                    scene_path, mode="camera", prompt=camera_scene_prompt(scene_language)
+                description_en = self.describer(
+                    scene_path, mode="camera", prompt=camera_scene_prompt("en")
                 ) or ""
-            resolved = {x["person_id"] for x in evidence if x.get("person_id")}
-            for person_id, display_name in self.settings.known_persons.items():
-                if person_id not in resolved:
-                    description = re.sub(rf"\b{re.escape(display_name)}\b", "a person", description,
-                                         flags=re.IGNORECASE)
+                vision_model_calls = 1
+            # The VLM and translation worker are never identity authorities.
+            for display_name in self.settings.known_persons.values():
+                description_en = re.sub(rf"\b{re.escape(display_name)}\b", "a person",
+                                        description_en, flags=re.IGNORECASE)
+            if not scene_persons:
+                anonymous = _anonymous_scene_person(
+                    description_en, frame_id=frame_id, camera_id=camera_id)
+                if anonymous:
+                    scene_persons = [anonymous]
+                    identity_binding_reason = "anonymous_visual_person"
+            presentation_language = "de" if scene_language.strip().lower().startswith("de") else "en"
+            if presentation_language == "de" and description_en and self.translator is not None:
+                lease = self.translation_lease() if self.translation_lease is not None else nullcontext()
+                with lease:
+                    description_de = self.translator(description_en) or ""
+                    translation_model_calls = 1
+                for display_name in self.settings.known_persons.values():
+                    description_de = re.sub(rf"\b{re.escape(display_name)}\b", "eine Person",
+                                            description_de, flags=re.IGNORECASE)
+            description = description_de if presentation_language == "de" else description_en
+            resolved_names = [self.settings.known_persons[x["person_id"]]
+                              for x in scene_persons if x.get("person_id") in self.settings.known_persons]
+            if len(scene_persons) == 1 and len(resolved_names) == 1:
+                description, identity_binding_reason = _compose_single_person_description(
+                    description, resolved_names[0], language=presentation_language)
+                identity_enriched = True
+            elif len(scene_persons) > 1:
+                identity_binding_reason = "multiple_scene_persons_ambiguous"
+            objects, relations, object_details = _extract_scene_structure(
+                description_en, scene_persons, frame_id=frame_id, camera_id=camera_id)
             description_at = _utc_now()
         perceived_at = _utc_now()
+        scene_observation = {"frame_id":frame_id, "camera_id":camera_id,
+            "captured_at":captured_at, "perceived_at":perceived_at,
+            "description_en":description_en, "description_de":description_de,
+            "final_description":description, "identity_enriched":identity_enriched,
+            "identity_binding_reason":identity_binding_reason,
+            "identity_source":"local_recognition", "persons":scene_persons,
+            "scene_person_count":len(scene_persons),
+            "canonical_person_count":len({x["person_entity_id"] for x in scene_persons
+                                           if x.get("person_entity_id")}),
+            "track_handover_detected":track_handover_detected,
+            "track_handover_from":track_handover_from, "track_handover_to":track_handover_to,
+            "track_handover_reason":track_handover_reason,
+            "track_continuity_score":track_continuity_score,
+            "objects":objects, "object_details":object_details, "relations":relations}
         self.continuum.observe(VisualObservation(description or f"Camera perception: {len(evidence)} person(s)",
-            persons=evidence, confidence=.8), session_id=session_id)
+            persons=scene_persons, objects=objects, relations=relations, confidence=.8,
+            timestamp=perceived_at), session_id=session_id)
         graph = self.continuum._graph()
+        current_scene_unknown_count = sum(1 for item in scene_persons
+                                          if not item.get("person_entity_id"))
+        historical_unknown_count = sum(1 for person in self.continuum.persons().values()
+                                       if not person.known and not person.current_presence)
         for item in evidence:
             track = graph.get("tracks", {}).get(item["track_id"], {})
             track.update({"track_id":item["track_id"], "sensor_id":"camera_primary",
                           "first_seen":track.get("first_seen") or perceived_at,
                           "last_seen":perceived_at, "present":True,
                           "bounding_box":item["bounding_box"]})
-        result = PerceptionResult(captured_at, perceived_at, str(image_path), str(scene_path), evidence,
+        result = PerceptionResult(captured_at, perceived_at, str(image_path), str(scene_path), scene_persons,
             [x["track_id"] for x in evidence], sorted({x["person_id"] for x in evidence if x["person_id"]}),
-            description, description_at, False, reason)
+            description, description_at, False, reason, description_en, description_de,
+            "en", "en", "de" if scene_language.strip().lower().startswith("de") else "en",
+            vision_model_calls, translation_model_calls, 0, "local_recognition",
+            frame_id, camera_id, identity_enriched, identity_binding_reason, description,
+            len(scene_persons), len({x["person_entity_id"] for x in scene_persons
+                                    if x.get("person_entity_id")}),
+            objects, relations, scene_observation)
+        result.object_details = object_details
+        result.track_handover_detected = track_handover_detected
+        result.track_handover_from = track_handover_from
+        result.track_handover_to = track_handover_to
+        result.track_handover_reason = track_handover_reason
+        result.track_continuity_score = track_continuity_score
+        result.current_scene_unknown_count = current_scene_unknown_count
+        result.historical_unknown_count = historical_unknown_count
         graph["next_track_id"] = next_id
         graph["perception"] = {"last_capture":captured_at, "last_perception":perceived_at, **asdict(result)}
         self.continuum._write(self.continuum.persons_path, graph)

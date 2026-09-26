@@ -66,6 +66,9 @@ def default_workers(settings: Any) -> tuple[WorkerSpec, ...]:
         WorkerSpec("ollama_reasoning", "ollama", settings.ollama_model,
                    (ModelCapability.DIALOGUE, ModelCapability.REASONING),
                    gpu_required=True, priority=100),
+        WorkerSpec("ollama_translation", "ollama", settings.ollama_model,
+                   (ModelCapability.DIALOGUE,), gpu_required=True, priority=110,
+                   metadata={"translation_only":True}),
         WorkerSpec("smolvlm_vision", "transformers", settings.vision_model,
                    (ModelCapability.VISION,), enabled=bool(settings.vision_enabled),
                    gpu_required=True, priority=100,
@@ -91,6 +94,9 @@ def profile_for_operation(operation: str, *, command_requires_llm: bool | None =
     if name in {"telegram:/see", "telegram:/camera", "vision.camera"}:
         return TaskProfile("vision.camera", (ModelCapability.VISION,), ModelCapability.VISION,
                            metadata={"reason":"explicit camera scene request"})
+    if name == "vision.translation":
+        return TaskProfile("vision.translation", (ModelCapability.DIALOGUE,), ModelCapability.DIALOGUE,
+                           metadata={"reason":"translation-only visual presentation"})
     if name in {"reply", "dialogue.reply"}:
         return TaskProfile("dialogue.reply", (ModelCapability.REASONING,), ModelCapability.REASONING,
                            metadata={"reason":"normal conversational reasoning"})

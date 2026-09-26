@@ -58,7 +58,8 @@ from avacore.tools.web_research import (
     serialize_sources,
 )
 from avacore.mail.service import MailService
-from avacore.vision.describe import describe_image_with_smolvlm, detect_image_mode, vision_worker_loaded
+from avacore.vision.describe import (describe_image_with_smolvlm, detect_image_mode,
+                                    unload_vision_worker, vision_worker_loaded)
 from avacore.vision.perception import CameraPerceptionService
 from avacore.system.ollama_runtime import loaded_ollama_models, start_ollama_server, unload_ollama_model
 from avacore.model.resources import (
@@ -150,10 +151,27 @@ def orbit_formation_service() -> EpistemicSalienceEvaluator:
         cooldown_seconds=settings.orbit_formation_cooldown_seconds))
 
 
-def camera_perception_service(route_decision=None) -> CameraPerceptionService:
+def _translate_visual_description(description_en: str) -> str:
+    ensure_ollama_runtime()
+    return backend.chat([
+        {"role":"system", "content":(
+            "Translate the English visual description faithfully into German. "
+            "Do not add, remove, interpret, summarize, or infer information. "
+            "Preserve uncertainty, objects, actions, and spatial relationships. "
+            "Do not add person names. Return only the German translation."
+        )},
+        {"role":"user", "content":f"TEXT:\n{description_en}"},
+    ])
+
+
+def camera_perception_service(route_decision=None, translation_decision=None) -> CameraPerceptionService:
     vision_lease = ((lambda: resource_coordinator.lease(route_decision))
                     if route_decision is not None else None)
-    return CameraPerceptionService(settings, continuum_service(), vision_lease=vision_lease)
+    translation_lease = ((lambda: resource_coordinator.lease(translation_decision))
+                         if translation_decision is not None else None)
+    return CameraPerceptionService(settings, continuum_service(), vision_lease=vision_lease,
+        translator=_translate_visual_description if translation_decision is not None else None,
+        translation_lease=translation_lease)
 
 
 # -----------------------------------------------------------------------------
@@ -271,7 +289,8 @@ resource_coordinator = ResourceCoordinator(
     snapshot_provider=runtime_resource_provider,
     release_adapters={"ollama_reasoning":lambda: unload_ollama_model(
         settings.ollama_model, settings.ollama_url,
-        timeout=min(10.0, settings.ollama_timeout_ms / 1000.0))},
+        timeout=min(10.0, settings.ollama_timeout_ms / 1000.0)),
+        "smolvlm_vision":unload_vision_worker},
     enabled=settings.resource_coordinator_enabled,
     history_limit=settings.resource_history_limit,
 )
@@ -1937,7 +1956,10 @@ def request_camera_perception(payload: CameraPerceptionRequest,
             "telegram:/idcheck" if payload.reason == "idcheck" else "telegram:/who"
         )
         route_decision = model_router.route(profile_for_operation(operation))
-        return asdict(camera_perception_service(route_decision).request(reason=payload.reason, force=payload.force,
+        translation_decision = (model_router.route(profile_for_operation("vision.translation"))
+                                if payload.include_scene and payload.scene_language.casefold().startswith("de")
+                                else None)
+        return asdict(camera_perception_service(route_decision, translation_decision).request(reason=payload.reason, force=payload.force,
             include_scene=payload.include_scene, session_id=payload.session_id,
             scene_language=payload.scene_language))
     except RuntimeError as exc:

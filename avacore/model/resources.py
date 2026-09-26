@@ -133,6 +133,8 @@ def default_resource_profiles(*, preempt_reasoning_for_vision: bool = True
                               ) -> tuple[WorkerResourceProfile, ...]:
     return (
         WorkerResourceProfile("ollama_reasoning", True, release_supported=True),
+        WorkerResourceProfile("ollama_translation", True,
+            preempt_before_start=("smolvlm_vision",)),
         WorkerResourceProfile("smolvlm_vision", True,
             preempt_before_start=(("ollama_reasoning",)
                                   if preempt_reasoning_for_vision else ()),

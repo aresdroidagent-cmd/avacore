@@ -6,7 +6,8 @@ import pytest
 from PIL import Image
 
 from avacore.core.continuum import ContinuumService
-from avacore.vision.perception import CameraPerceptionService
+from avacore.memory.sqlite_store import SQLiteStore
+from avacore.vision.perception import CameraPerceptionService, _deduplicate_scene_persons
 
 
 def continuum(tmp_path):
@@ -190,6 +191,398 @@ def test_scene_language_cannot_supply_identity(tmp_path):
     assert not service.continuum.persons()["roger"].current_presence
 
 
+def test_german_see_uses_english_vlm_then_translation(tmp_path):
+    prompts = []
+    service = CameraPerceptionService(configuration(tmp_path), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: [], recognizer=lambda **_: None,
+        describer=lambda *_a, **kw: (prompts.append(kw["prompt"]) or
+                                     "A person is standing next to a table."),
+        translator=lambda text: "Eine Person steht neben einem Tisch.")
+    result = service.request(reason="see_command", force=True, include_scene=True,
+                             scene_language="de")
+    assert "Return the description in English" in prompts[0]
+    assert result.description_en == "A person is standing next to a table."
+    assert result.description_de == "Eine Person steht neben einem Tisch."
+    assert result.scene_description == result.description_de
+    assert result.vlm_prompt_language == result.vlm_output_language == "en"
+    assert result.presentation_language == "de"
+    assert (result.vision_model_calls, result.translation_model_calls,
+            result.reasoning_model_calls) == (1, 1, 0)
+    debug = service.state()
+    assert debug["description_en_excerpt"] == result.description_en
+    assert debug["description_de_excerpt"] == result.description_de
+    assert debug["identity_source"] == "local_recognition"
+
+
+def test_translation_preserves_uncertainty_and_does_not_invent_identity(tmp_path):
+    service = CameraPerceptionService(configuration(tmp_path), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: [], recognizer=lambda **_: None,
+        describer=lambda *_a, **_kw: "There may be a small object on the table.",
+        translator=lambda _text: "Auf dem Tisch könnte sich ein kleiner Gegenstand befinden.")
+    result = service.request(reason="see_command", force=True, include_scene=True,
+                             scene_language="de")
+    assert "könnte" in result.scene_description
+    assert "Roger" not in result.scene_description
+
+
+def test_local_identity_enrichment_happens_after_translation(tmp_path):
+    service = CameraPerceptionService(configuration(tmp_path), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: [[10, 10, 100, 200]],
+        recognizer=lambda **_: SimpleNamespace(identity="roger", confidence=.96,
+            face_path="face.jpg", top_label="roger", reason="test"),
+        describer=lambda *_a, **_kw: "A person is sitting at a desk.",
+        translator=lambda _text: "Eine Person sitzt an einem Schreibtisch.")
+    result = service.request(reason="see_command", force=True, include_scene=True,
+                             scene_language="de")
+    assert result.description_de == "Eine Person sitzt an einem Schreibtisch."
+    assert result.scene_description == "Roger sitzt an einem Schreibtisch."
+    assert result.identity_source == "local_recognition"
+
+
+def test_man_wording_binds_single_fresh_local_identity(tmp_path):
+    service = CameraPerceptionService(configuration(tmp_path), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: [[10, 10, 100, 200]],
+        recognizer=lambda **_: SimpleNamespace(identity="roger", confidence=.917,
+            face_path="face.jpg", top_label="roger", reason="test"),
+        describer=lambda *_a, **_kw: "A man is standing next to a sofa.",
+        translator=lambda _text: "Ein Mann steht neben einem Sofa.")
+    result = service.request(reason="see_command", force=True, include_scene=True,
+                             scene_language="de")
+    assert result.scene_description == "Roger steht neben einem Sofa."
+    assert result.identity_enriched is True
+    person = result.last_scene_observation["persons"][0]
+    assert person["person_entity_id"] == "person:roger"
+    assert person["display_name"] == "Roger"
+    assert person["binding_status"] == "confirmed_local"
+    assert result.identity_binding_reason == "single_fresh_identity_action_bound"
+
+
+def test_pronoun_sensitive_composition_uses_conservative_two_part_form(tmp_path):
+    service = CameraPerceptionService(configuration(tmp_path), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: [[10, 10, 100, 200]],
+        recognizer=lambda **_: SimpleNamespace(identity="roger", confidence=.946,
+            face_path="face.jpg", top_label="roger", reason="test"),
+        describer=lambda *_a, **_kw: (
+            "man holding phone with screen facing towards him while sitting next to couch."),
+        translator=lambda _text: (
+            "eine Person hält ein Telefon mit dem Bildschirm zum Gesicht gerichtet, "
+            "während sie neben dem Sofa sitzt."))
+    result = service.request(reason="see_command", force=True, include_scene=True,
+                             scene_language="de")
+    assert result.scene_description.startswith("Roger ist sichtbar. Die Person hält")
+    assert "Roger hält" not in result.scene_description
+    assert "während sie" not in result.scene_description
+    assert "während die Person" in result.scene_description
+    assert result.identity_binding_reason == "single_fresh_identity_pronoun_safe"
+    assert {"phone", "sofa"} <= set(result.objects)
+    assert any(x["subject_id"] == "person:roger" and x["predicate"] == "HOLDING"
+               and x["object_id"] == "phone" for x in result.relations)
+
+
+def test_low_confidence_identity_is_not_enriched(tmp_path):
+    service = CameraPerceptionService(configuration(tmp_path), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: [[10, 10, 100, 200]],
+        recognizer=lambda **_: SimpleNamespace(identity="roger", confidence=.5,
+            face_path="face.jpg", top_label="roger", reason="below threshold"),
+        describer=lambda *_a, **_kw: "A person is standing near a sofa.",
+        translator=lambda _text: "Eine Person steht neben einem Sofa.")
+    result = service.request(reason="see_command", force=True, include_scene=True,
+                             scene_language="de")
+    assert result.identity_enriched is False
+    assert result.persons[0]["person_entity_id"] is None
+    assert result.scene_description.startswith("Eine Person")
+
+
+def test_stale_track_identity_is_not_reused_for_new_see_frame(tmp_path):
+    decisions = iter([("roger", .96), ("unknown", .4)])
+    def recognize(**_):
+        identity, confidence = next(decisions)
+        return SimpleNamespace(identity=identity, confidence=confidence, face_path="face.jpg",
+                               top_label=identity, reason="test")
+    service = CameraPerceptionService(configuration(tmp_path, freshness=0), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: [[10, 10, 100, 200]],
+        recognizer=recognize, describer=lambda *_a, **_kw: "A person is near a sofa.",
+        translator=lambda _text: "Eine Person steht neben einem Sofa.")
+    first = service.request(reason="see_command", force=True, include_scene=True, scene_language="de")
+    second = service.request(reason="see_command", force=True, include_scene=True, scene_language="de")
+    assert first.identity_enriched is True
+    assert second.identity_enriched is False
+    assert second.scene_description.startswith("Eine Person")
+    assert second.persons[0]["binding_status"] == "unbound"
+
+
+def test_recent_spatial_unknown_track_hands_over_to_new_canonical_track(tmp_path):
+    detections = iter([[[10, 10, 100, 200]], [[75, 10, 100, 200]]])
+    decisions = iter([("unknown", .919), ("roger", .931)])
+    def recognize(**_):
+        identity, confidence = next(decisions)
+        return SimpleNamespace(identity=identity, confidence=confidence, face_path="face.jpg",
+                               top_label=identity, reason="test")
+    service = CameraPerceptionService(configuration(tmp_path, freshness=5), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: next(detections),
+        recognizer=recognize, describer=lambda *_a, **_kw: "A man is sitting near a sofa.",
+        translator=lambda _text: "Ein Mann sitzt neben einem Sofa.")
+    first = service.request(reason="idcheck", force=True, include_scene=False)
+    second = service.request(reason="see_command", force=True, include_scene=True, scene_language="de")
+    assert first.identities_resolved == []
+    assert second.identities_resolved == ["roger"]
+    assert second.track_handover_detected is True
+    assert second.track_handover_from == first.tracks_active[0]
+    assert second.track_handover_to == second.tracks_active[0]
+    assert second.current_scene_unknown_count == 0
+    assert second.historical_unknown_count >= 1
+    assert second.scene_person_count == second.canonical_person_count == 1
+    assert second.identity_enriched is True
+    assert second.scene_description.startswith("Roger ")
+
+
+def test_incompatible_boxes_prevent_track_handover(tmp_path):
+    detections = iter([[[10, 10, 80, 180]], [[350, 10, 80, 180]]])
+    decisions = iter([("unknown", .92), ("roger", .94)])
+    def recognize(**_):
+        identity, confidence = next(decisions)
+        return SimpleNamespace(identity=identity, confidence=confidence, face_path="face.jpg",
+                               top_label=identity, reason="test")
+    service = CameraPerceptionService(configuration(tmp_path, freshness=5), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: next(detections), recognizer=recognize,
+        describer=lambda *_a, **_kw: "A man is visible.",
+        translator=lambda _text: "Ein Mann ist sichtbar.")
+    service.request(reason="idcheck", force=True, include_scene=False)
+    result = service.request(reason="see_command", force=True, include_scene=True, scene_language="de")
+    assert result.track_handover_detected is False
+    assert result.track_handover_from is None
+
+
+def test_two_current_people_are_not_collapsed_by_handover(tmp_path):
+    service = CameraPerceptionService(configuration(tmp_path), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path),
+        detector=lambda _: [[10, 10, 100, 200], [300, 10, 100, 200]],
+        recognizer=lambda **_: SimpleNamespace(identity="unknown", confidence=.4,
+            face_path=None, top_label="unknown", reason="test"),
+        describer=lambda *_a, **_kw: "Two people are visible.",
+        translator=lambda _text: "Zwei Personen sind sichtbar.")
+    result = service.request(reason="see_command", force=True, include_scene=True, scene_language="de")
+    assert result.track_handover_detected is False
+    assert result.scene_person_count == 2
+    assert result.current_scene_unknown_count == 2
+
+
+def test_scene_observation_binds_person_objects_and_explicit_relations(tmp_path):
+    service = CameraPerceptionService(configuration(tmp_path), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: [[10, 10, 100, 200]],
+        recognizer=lambda **_: SimpleNamespace(identity="roger", confidence=.96,
+            face_path="face.jpg", top_label="roger", reason="test"),
+        describer=lambda *_a, **_kw: (
+            "A man is standing near a sofa. A coffee cup is on the table."),
+        translator=lambda _text: (
+            "Ein Mann steht neben einem Sofa. Auf dem Tisch steht eine Kaffeetasse."))
+    result = service.request(reason="see_command", force=True, include_scene=True,
+                             scene_language="de")
+    assert set(result.objects) == {"sofa", "coffee_cup", "table"}
+    assert {("person:roger", "NEAR", "sofa"), ("coffee_cup", "ON", "table")} == {
+        (item["subject_id"], item["predicate"], item["object_id"]) for item in result.relations}
+    stored = service.continuum._graph()["last_observation"]
+    assert stored["objects"] == result.objects
+    assert stored["relations"] == result.relations
+
+
+def test_real_scene_objects_and_relations_are_normalized(tmp_path):
+    service = CameraPerceptionService(configuration(tmp_path), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: [[10, 10, 100, 200]],
+        recognizer=lambda **_: SimpleNamespace(identity="roger", confidence=.94,
+            face_path="face.jpg", top_label="roger", reason="test"),
+        describer=lambda *_a, **_kw: (
+            "man sitting on couch with coffee mug on table and papers on floor."),
+        translator=lambda _text: (
+            "Ein Mann sitzt auf dem Sofa mit einer Kaffeetasse auf dem Tisch "
+            "und Papieren auf dem Boden."))
+    result = service.request(reason="see_command", force=True, include_scene=True,
+                             scene_language="de")
+    assert result.scene_description.startswith("Roger sitzt auf dem Sofa")
+    assert set(result.objects) == {"sofa", "coffee_cup", "papers", "table", "floor"}
+    triples = {(x["subject_id"], x["predicate"], x["object_id"]) for x in result.relations}
+    assert ("person:roger", "SITTING_ON", "sofa") in triples
+    assert ("coffee_cup", "ON", "table") in triples
+    assert ("papers", "ON", "floor") in triples
+
+
+def test_visible_cup_without_relation_does_not_invent_on_table(tmp_path):
+    service = CameraPerceptionService(configuration(tmp_path), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: [], recognizer=lambda **_: None,
+        describer=lambda *_a, **_kw: "A cup is visible.",
+        translator=lambda _text: "Eine Tasse ist sichtbar.")
+    result = service.request(reason="see_command", force=True, include_scene=True,
+                             scene_language="de")
+    assert result.objects == ["coffee_cup"]
+    assert result.relations == []
+
+
+def test_vlm_person_without_local_detection_materializes_anonymous_scene_person(tmp_path):
+    service = CameraPerceptionService(configuration(tmp_path), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: [], recognizer=lambda **_: None,
+        describer=lambda *_a, **_kw: "man sitting on couch.",
+        translator=lambda _text: "Ein Mann sitzt auf dem Sofa.")
+    result = service.request(reason="see_command", force=True, include_scene=True,
+                             scene_language="de")
+    assert result.tracks_active == []
+    assert result.identities_resolved == []
+    assert result.scene_person_count == 1
+    assert result.canonical_person_count == 0
+    assert len(result.persons) == 1
+    anonymous = result.persons[0]
+    assert anonymous["scene_person_id"].startswith(f"scene_person:{result.frame_id}:")
+    assert anonymous["person_entity_id"] is None
+    assert anonymous["binding_status"] == "anonymous_visual"
+    assert anonymous["identity_source"] == "none"
+    relation = next(x for x in result.relations if x["predicate"] == "SITTING_ON")
+    assert relation["subject_id"] == anonymous["scene_person_id"]
+    assert anonymous["scene_person_id"] not in service.continuum.persons()
+
+
+def test_safe_canonical_binding_has_no_parallel_anonymous_person(tmp_path):
+    service = CameraPerceptionService(configuration(tmp_path), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: [[10, 10, 100, 200]],
+        recognizer=lambda **_: SimpleNamespace(identity="roger", confidence=.95,
+            face_path="face.jpg", top_label="roger", reason="test"),
+        describer=lambda *_a, **_kw: "man sitting on couch.",
+        translator=lambda _text: "Ein Mann sitzt auf dem Sofa.")
+    result = service.request(reason="see_command", force=True, include_scene=True,
+                             scene_language="de")
+    assert result.scene_person_count == result.canonical_person_count == 1
+    assert len(result.persons) == 1
+    assert result.persons[0]["person_entity_id"] == "person:roger"
+    assert not any(person.get("binding_status") == "anonymous_visual" for person in result.persons)
+    assert all(x["subject_id"] != f"scene_person:{result.frame_id}:1" for x in result.relations)
+
+
+def test_ambiguous_drink_container_keeps_type_uncertainty_and_on_relation(tmp_path):
+    service = CameraPerceptionService(configuration(tmp_path), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: [], recognizer=lambda **_: None,
+        describer=lambda *_a, **_kw: "A cup/glass/bottle is on the table.",
+        translator=lambda _text: "Ein Trinkgefäß steht auf dem Tisch.")
+    result = service.request(reason="see_command", force=True, include_scene=True,
+                             scene_language="de")
+    assert "drink_container" in result.objects
+    assert "coffee_cup" not in result.objects
+    detail = next(x for x in result.object_details if x["object_id"] == "drink_container")
+    assert detail["uncertain"] is True
+    assert detail["raw_label"] == "cup/glass/bottle"
+    assert detail["candidate_labels"] == ["coffee_cup", "glass", "bottle"]
+    assert any(x["subject_id"] == "drink_container" and x["predicate"] == "ON"
+               and x["object_id"] == "table" for x in result.relations)
+
+
+def test_definite_coffee_mug_remains_coffee_cup(tmp_path):
+    service = CameraPerceptionService(configuration(tmp_path), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: [], recognizer=lambda **_: None,
+        describer=lambda *_a, **_kw: "A coffee mug is on the table.",
+        translator=lambda _text: "Eine Kaffeetasse steht auf dem Tisch.")
+    result = service.request(reason="see_command", force=True, include_scene=True,
+                             scene_language="de")
+    assert {"coffee_cup", "table"} <= set(result.objects)
+    detail = next(x for x in result.object_details if x["object_id"] == "coffee_cup")
+    assert detail["uncertain"] is False
+
+
+def test_multiple_people_do_not_receive_ambiguous_scene_assignment(tmp_path):
+    decisions = iter([("roger", .96), ("unknown", .4)])
+    def recognize(**_):
+        identity, confidence = next(decisions)
+        return SimpleNamespace(identity=identity, confidence=confidence, face_path="face.jpg",
+                               top_label=identity, reason="test")
+    service = CameraPerceptionService(configuration(tmp_path), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path),
+        detector=lambda _: [[10, 10, 100, 200], [300, 10, 100, 200]], recognizer=recognize,
+        describer=lambda *_a, **_kw: "A person is standing near a sofa. Another person is visible.",
+        translator=lambda _text: "Eine Person steht neben einem Sofa. Eine weitere Person ist sichtbar.")
+    result = service.request(reason="see_command", force=True, include_scene=True,
+                             scene_language="de")
+    assert result.identity_enriched is False
+    assert "Roger steht" not in result.scene_description
+    assert not any(item["predicate"] == "NEAR" for item in result.relations)
+
+
+def test_duplicate_tracks_for_same_identity_collapse_in_scene_only():
+    people = [{"track_id":"camera_primary:21", "person_entity_id":"person:roger",
+               "person_id":"roger"},
+              {"track_id":"camera_primary:22", "person_entity_id":"person:roger",
+               "person_id":"roger"}]
+    result = _deduplicate_scene_persons(people)
+    assert len(result) == 1
+    assert result[0]["person_entity_id"] == "person:roger"
+
+
+def test_repeated_scene_reuses_canonical_person_entity(tmp_path):
+    service = CameraPerceptionService(configuration(tmp_path, freshness=0), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: [[10, 10, 100, 200]],
+        recognizer=lambda **_: SimpleNamespace(identity="roger", confidence=.96,
+            face_path="face.jpg", top_label="roger", reason="test"),
+        describer=lambda *_a, **_kw: "A person is visible.",
+        translator=lambda _text: "Eine Person ist sichtbar.")
+    service.request(reason="see_command", force=True, include_scene=True, scene_language="de")
+    service.request(reason="see_command", force=True, include_scene=True, scene_language="de")
+    assert [person_id for person_id in service.continuum.persons() if person_id == "roger"] == ["roger"]
+    assert len([relation for relation in service.continuum.relations()
+                if relation.predicate == "identified_as" and relation.object_id == "person:roger"]) == 1
+
+
+def test_single_see_does_not_create_long_term_memory_candidate(tmp_path):
+    memory = SQLiteStore(tmp_path / "memory.db")
+    service = CameraPerceptionService(configuration(tmp_path), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: [], recognizer=lambda **_: None,
+        describer=lambda *_a, **_kw: "A cup is visible.",
+        translator=lambda _text: "Eine Tasse ist sichtbar.")
+    service.request(reason="see_command", force=True, include_scene=True, scene_language="de")
+    assert memory.list_memory_items(status="candidate") == []
+
+
+def test_unknown_person_remains_generic_after_translation(tmp_path):
+    service = CameraPerceptionService(configuration(tmp_path), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: [[10, 10, 100, 200]],
+        recognizer=lambda **_: SimpleNamespace(identity="unknown", confidence=.4,
+            face_path=None, top_label="unknown", reason="test"),
+        describer=lambda *_a, **_kw: "A person is sitting at a desk.",
+        translator=lambda _text: "Eine Person sitzt an einem Schreibtisch.")
+    result = service.request(reason="see_command", force=True, include_scene=True,
+                             scene_language="de")
+    assert result.scene_description.startswith("Eine Person")
+    assert "Roger" not in result.scene_description
+
+
+def test_english_see_skips_translation(tmp_path):
+    service = CameraPerceptionService(configuration(tmp_path), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: [], recognizer=lambda **_: None,
+        describer=lambda *_a, **_kw: "A cup is on the desk.",
+        translator=lambda _text: pytest.fail("English presentation must not translate"))
+    result = service.request(reason="see_command", force=True, include_scene=True,
+                             scene_language="en")
+    assert result.scene_description == "A cup is on the desk."
+    assert (result.vision_model_calls, result.translation_model_calls,
+            result.reasoning_model_calls) == (1, 0, 0)
+
+
+def test_vision_and_translation_resource_leases_are_sequential(tmp_path):
+    order = []
+    @contextmanager
+    def vision_lease():
+        order.append("vision-enter")
+        try: yield
+        finally: order.append("vision-exit")
+    @contextmanager
+    def translation_lease():
+        order.append("translation-enter")
+        try: yield
+        finally: order.append("translation-exit")
+    service = CameraPerceptionService(configuration(tmp_path), continuum(tmp_path),
+        capture=lambda **_: frame(tmp_path), detector=lambda _: [], recognizer=lambda **_: None,
+        vision_lease=vision_lease, translation_lease=translation_lease,
+        describer=lambda *_a, **_kw: (order.append("vlm") or "An empty room."),
+        translator=lambda _text: (order.append("translate") or "Ein leerer Raum."))
+    service.request(reason="see_command", force=True, include_scene=True, scene_language="de")
+    assert order == ["vision-enter", "vlm", "vision-exit",
+                     "translation-enter", "translate", "translation-exit"]
+
+
 def test_perception_debug_state_is_structured_and_embedding_free(tmp_path):
     service = perception(tmp_path, [[10, 10, 100, 200]], [("roger", .96)])
     service.request(reason="idcheck", force=True)
@@ -225,7 +618,7 @@ async def test_who_command_refreshes_without_idcheck_and_uses_no_llm(monkeypatch
 
 
 @pytest.mark.anyio
-async def test_see_uses_one_perception_call_and_no_reply_translation(monkeypatch, tmp_path):
+async def test_see_uses_one_perception_call_and_api_managed_translation(monkeypatch, tmp_path):
     from avacore.channels.telegram import bot
     replies = []
     update = SimpleNamespace(
@@ -255,6 +648,26 @@ async def test_see_uses_one_perception_call_and_no_reply_translation(monkeypatch
     assert urls[0][0].endswith("/perception/camera")
     assert urls[0][1]["scene_language"] == "de"
     assert not any(url.endswith("/reply") for url, _ in urls)
+
+
+@pytest.mark.anyio
+async def test_see_caption_uses_current_scene_unknown_count_only(monkeypatch, tmp_path):
+    from avacore.channels.telegram import bot
+    replies = []
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=42),
+        effective_message=SimpleNamespace(reply_text=lambda text: _reply(replies, text),
+            reply_photo=lambda **kwargs: _reply(replies, kwargs.get("caption", ""))))
+    class Response:
+        ok = True; text = ""
+        def json(self):
+            return {"scene_description":"Roger sitzt neben einem Sofa.",
+                "persons":[{"person_id":"roger"}, {"person_id":None}],
+                "current_scene_unknown_count":0, "historical_unknown_count":1,
+                "image_path":str(tmp_path / "missing.jpg")}
+    async def post(*_args, **_kwargs): return Response()
+    monkeypatch.setattr(bot.http_client, "post", post)
+    await bot.active_camera_cmd(update, SimpleNamespace(chat_data={"reply_language":"de"}))
+    assert "Unbekannte Personen" not in replies[0]
 
 
 async def _reply(items, text):
