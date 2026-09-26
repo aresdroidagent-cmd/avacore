@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -179,6 +180,7 @@ class SQLiteStore:
                     tags TEXT NOT NULL DEFAULT '',
                     created_from_user_text TEXT NOT NULL DEFAULT '',
                     created_from_assistant_text TEXT NOT NULL DEFAULT '',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
                     verified_by TEXT NOT NULL DEFAULT '',
                     verified_at TEXT NOT NULL DEFAULT '',
                     rejected_by TEXT NOT NULL DEFAULT '',
@@ -200,6 +202,9 @@ class SQLiteStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memory_items_source_type ON memory_items(source_type)"
             )
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(memory_items)").fetchall()}
+            if "metadata_json" not in columns:
+                conn.execute("ALTER TABLE memory_items ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'")
 
             conn.commit()
 
@@ -387,6 +392,7 @@ class SQLiteStore:
         tags: str = "",
         created_from_user_text: str = "",
         created_from_assistant_text: str = "",
+        metadata: dict[str, Any] | None = None,
     ) -> int:
         now = self._utcnow()
         with self._connect() as conn:
@@ -398,9 +404,10 @@ class SQLiteStore:
                     source_type, source_ref,
                     confidence, importance, tags,
                     created_from_user_text, created_from_assistant_text,
+                    metadata_json,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scope,
@@ -415,12 +422,22 @@ class SQLiteStore:
                     tags,
                     created_from_user_text,
                     created_from_assistant_text,
+                    json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True)[:4000],
                     now,
                     now,
                 ),
             )
             conn.commit()
             return int(cur.lastrowid)
+
+    def memory_item_exists(self, scope: str, content: str) -> bool:
+        normalized = " ".join(content.casefold().split())
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT content FROM memory_items WHERE scope = ? ORDER BY id DESC LIMIT 500",
+                (scope,),
+            ).fetchall()
+        return any(" ".join(str(row["content"]).casefold().split()) == normalized for row in rows)
 
     def list_memory_items(
         self,

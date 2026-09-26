@@ -20,6 +20,14 @@ class AutoMemoryExtractor:
 
         rules: list[tuple[re.Pattern[str], str]] = [
             (
+                re.compile(r"^(?:merk dir(?: bitte)?|behalte das|remember this)[,:]?\s+(.+)$", re.IGNORECASE),
+                "Explizit gemerkt",
+            ),
+            (
+                re.compile(r"^wir\s+verwenden\s+(.+)$", re.IGNORECASE),
+                "Entscheidung",
+            ),
+            (
                 re.compile(r"^meine?\s+(.+?)\s+ist\s+(.+)$", re.IGNORECASE),
                 "Persönliche Angabe",
             ),

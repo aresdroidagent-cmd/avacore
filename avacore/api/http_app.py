@@ -96,11 +96,16 @@ from avacore.core.research_grounding import (
     TemporalContext, classify_research_question, normalize_evidence,
     select_evidence, build_research_plan, research_debug, research_search_queries,
 )
+from avacore.core.memory_admission import (
+    MemoryAdmissionObservability, MemoryAdmissionPolicy,
+)
 
 _ollama_process = None
 _pending_cognitive_cycles: dict[str, dict] = {}
 _last_grounding_debug: dict = {}
 _last_research_grounding_debug: dict = {}
+memory_admission_policy = MemoryAdmissionPolicy()
+memory_admission_observability = MemoryAdmissionObservability()
 
 # http_app.py is in avacore/api/http_app.py.
 # Static web files now live in avacore/web/static.
@@ -657,10 +662,13 @@ def _create_candidate_memory(
     tags: str = "",
     created_from_user_text: str = "",
     created_from_assistant_text: str = "",
+    metadata: dict | None = None,
 ) -> int | None:
     """Create a candidate memory in the new review workflow, with legacy fallback."""
 
     if hasattr(store, "create_memory_item"):
+        if hasattr(store, "memory_item_exists") and store.memory_item_exists("user", content):
+            return None
         return store.create_memory_item(
             scope="user",
             title=title,
@@ -674,6 +682,7 @@ def _create_candidate_memory(
             tags=tags,
             created_from_user_text=created_from_user_text,
             created_from_assistant_text=created_from_assistant_text,
+            metadata=metadata or {},
         )
 
     # Fallback for older SQLiteStore versions.
@@ -695,6 +704,12 @@ def maybe_store_auto_memory(user_text: str) -> list[int]:
     stored_ids: list[int] = []
 
     for candidate in candidates:
+        decision = memory_admission_policy.conversation(
+            user_text, decision_detected=candidate.title in {"Entscheidung", "Festlegung"},
+            structured_candidate=True)
+        if not decision.admit:
+            memory_admission_observability.record(decision)
+            continue
         new_id = _create_candidate_memory(
             title=candidate.title,
             content=candidate.content,
@@ -704,7 +719,15 @@ def maybe_store_auto_memory(user_text: str) -> list[int]:
             importance=candidate.importance,
             tags=candidate.tags,
             created_from_user_text=user_text,
+            metadata=decision.metadata | {"admission_reason": decision.reason,
+                                          "memory_class": decision.memory_class.value,
+                                          "volatility": decision.volatility,
+                                          "temporal_scope": decision.temporal_scope,
+                                          "durability": decision.durability,
+                                          "evidence_quality": decision.evidence_quality},
         )
+        memory_admission_observability.record(decision, duplicate=new_id is None,
+                                              persisted=new_id is not None)
         if new_id is not None:
             stored_ids.append(int(new_id))
 
@@ -736,6 +759,12 @@ def maybe_store_assistant_memory(user_text: str, assistant_text: str) -> list[in
     stored_ids: list[int] = []
 
     for candidate in candidates:
+        decision = memory_admission_policy.conversation(
+            user_text, decision_detected=candidate.title in {"Entscheidung", "Festlegung"},
+            structured_candidate=True)
+        if not decision.admit:
+            memory_admission_observability.record(decision)
+            continue
         new_id = _create_candidate_memory(
             title=candidate.title,
             content=candidate.content,
@@ -746,7 +775,13 @@ def maybe_store_assistant_memory(user_text: str, assistant_text: str) -> list[in
             tags=(candidate.tags + ",assistant_derived").strip(","),
             created_from_user_text=user_text,
             created_from_assistant_text=assistant_text,
+            metadata=decision.metadata | {"admission_reason": decision.reason,
+                                          "memory_class": decision.memory_class.value,
+                                          "volatility": decision.volatility,
+                                          "temporal_scope": decision.temporal_scope},
         )
+        memory_admission_observability.record(decision, duplicate=new_id is None,
+                                              persisted=new_id is not None)
         if new_id is not None:
             stored_ids.append(int(new_id))
 
@@ -909,6 +944,16 @@ def run_research_workflow(query: str, max_results: int | None = None, save_memor
             _last_research_grounding_debug = research_debug(
                 spec, temporal, evidence, plan, plan.compliance(plan.render()), True)
             _last_research_grounding_debug.update(acquisition_debug)
+            admission = memory_admission_policy.research(
+                research_ok=False, temporal_scope=spec.temporal_scope.value,
+                response_mode=plan.response_mode, plan_compliance=False, fallback_used=True,
+                required_fact_coverage=0.0,
+                recommendation_confidence=plan.recommendation_confidence.value,
+                evidence_conflict=plan.evidence_conflict, temporal_claim_conflict=False,
+                search_failed=bool(acquisition_debug["search_queries_failed"] or
+                                   not acquisition_debug["fetch_succeeded"]),
+                facts=[], source_ids=[])
+            memory_admission_observability.record(admission)
             if acquisition_debug["raw_results_seen"] == 0:
                 answer = ("Die Websuche konnte für diese Anfrage nicht zuverlässig ausgeführt werden."
                           if acquisition_debug["search_queries_failed"] else
@@ -969,18 +1014,36 @@ def run_research_workflow(query: str, max_results: int | None = None, save_memor
             else save_memory
         )
 
-        if should_save:
+        admission_facts = [{"fact_id": fact.fact_id, "fact": fact.fact,
+                            "confidence": fact.confidence,
+                            "volatility": next((candidate.volatility.value for item in selected
+                                                for candidate in item.facts
+                                                if candidate.fact_id == fact.fact_id), "MEDIUM"),
+                            "temporal_basis": fact.temporal_basis.value,
+                            "source_evidence_ids": list(fact.source_evidence_ids)}
+                           for fact in plan.required_facts]
+        admission = memory_admission_policy.research(
+            research_ok=True, temporal_scope=spec.temporal_scope.value,
+            response_mode=plan.response_mode, plan_compliance=compliance["compliant"],
+            fallback_used=fallback_used,
+            required_fact_coverage=float(compliance.get("required_fact_coverage", 0.0)),
+            recommendation_confidence=plan.recommendation_confidence.value,
+            evidence_conflict=plan.evidence_conflict,
+            temporal_claim_conflict=bool(compliance.get("temporal_claim_conflict", False)),
+            search_failed=False, facts=admission_facts, source_ids=plan.source_ids)
+
+        if should_save and admission.admit:
             source_refs = "\n".join(
                 f"- {source.title}: {source.url}"
                 for source in selected_sources
                 if source.ok
             )
 
-            memory_content = (
-                f"Recherchefrage:\n{query}\n\n"
-                f"Zusammenfassung:\n{answer}\n\n"
-                f"Quellen:\n{source_refs}"
-            )
+            durable_facts = [fact for fact in admission_facts
+                             if fact["volatility"] == "LOW" or
+                             fact["temporal_basis"] in {"VALIDITY_INTERVAL", "TIMELESS_FACT"}]
+            memory_content = "Validierte Research-Fakten:\n" + "\n".join(
+                f"- {fact['fact']}" for fact in durable_facts[:5])
 
             memory_id = _create_candidate_memory(
                 title=f"Research: {query[:80]}",
@@ -993,7 +1056,24 @@ def run_research_workflow(query: str, max_results: int | None = None, save_memor
                 tags="research,web",
                 created_from_user_text=query,
                 created_from_assistant_text=answer,
+                metadata={"admission_reason": admission.reason,
+                          "source_type": admission.source_type,
+                          "memory_class": admission.memory_class.value,
+                          "research_mode": spec.research_mode.value,
+                          "temporal_scope": admission.temporal_scope,
+                          "volatility": admission.volatility,
+                          "durability": admission.durability,
+                          "evidence_quality": admission.evidence_quality,
+                          "source_evidence_ids": list(admission.source_ids),
+                          "fact_ids": [fact["fact_id"] for fact in durable_facts[:5]],
+                          "user_requested": False,
+                          "created_from_response_plan": True,
+                          "plan_compliance": compliance["compliant"],
+                          "fallback_used": fallback_used},
             )
+        memory_admission_observability.record(
+            admission, duplicate=bool(should_save and admission.admit and memory_id is None),
+            persisted=bool(memory_id) if admission.admit else None)
 
         if getattr(settings, "jspace_enabled", False):
             research_candidate = {
@@ -2486,6 +2566,11 @@ def research(
 @app.get("/debug/research/grounding")
 def debug_research_grounding(_: None = Depends(verify_admin_password)) -> dict:
     return dict(_last_research_grounding_debug)
+
+
+@app.get("/debug/memory/admission")
+def debug_memory_admission(_: None = Depends(verify_admin_password)) -> dict:
+    return memory_admission_observability.debug()
 
 
 @app.get("/debug/research_queue")
