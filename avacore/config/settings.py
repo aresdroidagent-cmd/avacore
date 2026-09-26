@@ -242,6 +242,9 @@ class Settings:
         self.research_max_results = bounded_int(
             "AVACORE_RESEARCH_MAX_RESULTS", 4, 1, 8
         )
+        self.search_provider = os.environ.get("AVA_SEARCH_PROVIDER", "ddg_html").strip().lower()
+        self.search_fallback_provider = os.environ.get("AVA_SEARCH_FALLBACK_PROVIDER", "").strip().lower()
+        self.searxng_url = os.environ.get("AVA_SEARXNG_URL", "").strip()
         self.research_queue_path = Path(
             os.environ.get(
                 "AVACORE_RESEARCH_QUEUE_PATH",

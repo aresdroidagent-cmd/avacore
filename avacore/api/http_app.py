@@ -6,10 +6,13 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import re
 import time
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
+
+import requests
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -89,10 +92,15 @@ from avacore.core.orbits import OrbitStore
 from avacore.core.research import ResearchDriveConfig, ResearchMemory, ResearchService
 from avacore.core.grounding import build_grounding_context, classify_intent, GroundingIntent, synthetic_orbit
 from avacore.core.response_plan import build_response_plan
+from avacore.core.research_grounding import (
+    TemporalContext, classify_research_question, normalize_evidence,
+    select_evidence, build_research_plan, research_debug, research_search_queries,
+)
 
 _ollama_process = None
 _pending_cognitive_cycles: dict[str, dict] = {}
 _last_grounding_debug: dict = {}
+_last_research_grounding_debug: dict = {}
 
 # http_app.py is in avacore/api/http_app.py.
 # Static web files now live in avacore/web/static.
@@ -784,6 +792,7 @@ def run_browser_task(fn, *args, **kwargs):
 # -----------------------------------------------------------------------------
 
 def run_research_workflow(query: str, max_results: int | None = None, save_memory: bool | None = None) -> dict:
+    global _last_research_grounding_debug
     if not getattr(settings, "research_enabled", True):
         raise HTTPException(status_code=400, detail="web research is disabled")
 
@@ -795,50 +804,163 @@ def run_research_workflow(query: str, max_results: int | None = None, save_memor
     result_limit = max(1, min(int(result_limit), 8))
 
     try:
-        sources = collect_research_sources(
-            query=query,
-            max_results=result_limit,
-            max_chars_per_source=5000,
-        )
+        temporal = TemporalContext.create(getattr(settings, "daily_briefing_timezone", "Europe/Zurich"))
+        spec = classify_research_question(query, temporal)
+        temporal = TemporalContext.create(temporal.local_timezone, spec.target_date, temporal.now_utc)
+        search_query_specs = research_search_queries(spec)
+        search_queries = tuple(item.query_text for item in search_query_specs)
+        sources = []
+        seen_urls = {}
+        query_diagnostics = []
+        for query_index, search_query_spec in enumerate(search_query_specs, 1):
+            search_query = search_query_spec.query_text
+            per_query_limit = min(result_limit, 2) if spec.comparison_targets else result_limit
+            acquisition = {"query_id": f"q{query_index}", "query_text": search_query[:180],
+                           "result_count_unique_added": 0,
+                           "requirement_ids": list(search_query_spec.requirement_ids),
+                           "target": search_query_spec.target,
+                           "criterion": search_query_spec.criterion}
+            try:
+                query_sources = collect_research_sources(
+                    query=search_query, max_results=per_query_limit, max_chars_per_source=5000,
+                    diagnostics=acquisition,
+                    provider_name=getattr(settings, "search_provider", "ddg_html"),
+                    fallback_provider_name=getattr(settings, "search_fallback_provider", "") or None,
+                    searxng_url=getattr(settings, "searxng_url", "") or None,
+                    requirement_ids=search_query_spec.requirement_ids,
+                )
+            except (requests.RequestException, ValueError) as exc:
+                acquisition.update(status="SEARCH_PROVIDER_ERROR", error_type=type(exc).__name__)
+                query_sources = []
+            acquisition.setdefault("status", "SEARCH_OK_WITH_RESULTS" if query_sources else "SEARCH_OK_EMPTY")
+            acquisition.setdefault("provider_status", acquisition["status"])
+            acquisition.setdefault("error_type", None)
+            acquisition.setdefault("http_status", None)
+            acquisition.setdefault("request_duration_ms", None)
+            acquisition.setdefault("retry_count", 0)
+            acquisition.setdefault("result_count_raw", len(query_sources))
+            acquisition.setdefault("fetch_attempted", len(query_sources))
+            acquisition.setdefault("fetch_succeeded", sum(source.ok and bool(source.text) for source in query_sources))
+            acquisition.setdefault("fetch_failed", len(query_sources) - acquisition["fetch_succeeded"])
+            query_diagnostics.append(acquisition)
+            for source in query_sources:
+                parts = urlsplit(source.url)
+                clean_query = urlencode([(key, value) for key, value in parse_qsl(parts.query)
+                                         if not key.casefold().startswith(("utm_", "ref", "fbclid"))])
+                key = urlunsplit((parts.scheme.casefold(), parts.netloc.casefold(),
+                                  parts.path.rstrip("/") or "/", clean_query, ""))
+                if key in seen_urls:
+                    existing = seen_urls[key]
+                    existing.originating_queries = tuple(dict.fromkeys(
+                        (*existing.originating_queries, *(source.originating_queries or (search_query,)))))
+                    existing.originating_providers = tuple(dict.fromkeys(
+                        (*existing.originating_providers, *source.originating_providers)))
+                    existing.originating_requirement_ids = tuple(dict.fromkeys(
+                        (*existing.originating_requirement_ids, *source.originating_requirement_ids)))
+                    continue
+                max_unique = min(8, len(search_queries) * per_query_limit) if spec.comparison_targets else result_limit
+                if len(sources) >= max_unique:
+                    continue
+                source.originating_queries = source.originating_queries or (search_query,)
+                sources.append(source)
+                seen_urls[key] = source
+                acquisition["result_count_unique_added"] += 1
+
+        acquisition_debug = {
+            "search_queries_generated": [item[:180] for item in search_queries],
+            "search_queries_executed": len(query_diagnostics),
+            "search_queries_attempted": len(query_diagnostics),
+            "search_queries_succeeded": sum(item["status"].startswith("SEARCH_OK") for item in query_diagnostics),
+            "search_queries_failed": sum(not item["status"].startswith("SEARCH_OK") for item in query_diagnostics),
+            "search_failure_counts": dict(Counter(item["status"] for item in query_diagnostics
+                                                  if not item["status"].startswith("SEARCH_OK"))),
+            "search_query_diagnostics": query_diagnostics[:4],
+            "raw_results_seen": sum(item["result_count_raw"] for item in query_diagnostics),
+            "unique_results_seen": len(sources),
+            "fetch_attempted": sum(item["fetch_attempted"] for item in query_diagnostics),
+            "fetch_succeeded": sum(item["fetch_succeeded"] for item in query_diagnostics),
+            "fetch_failed": sum(item["fetch_failed"] for item in query_diagnostics),
+            "provider_rate_limited": any(attempt.get("status") == "SEARCH_RATE_LIMITED"
+                                         for item in query_diagnostics
+                                         for attempt in item.get("provider_attempts", [item])),
+            "search_primary_provider": getattr(settings, "search_provider", "ddg_html"),
+            "search_fallback_provider": getattr(settings, "search_fallback_provider", "") or None,
+            "provider_attempt_counts": dict(Counter(attempt["provider"] for item in query_diagnostics
+                                                    for attempt in item.get("provider_attempts", []))),
+            "provider_success_counts": dict(Counter(attempt["provider"] for item in query_diagnostics
+                                                    for attempt in item.get("provider_attempts", [])
+                                                    if attempt["status"].startswith("SEARCH_OK"))),
+            "provider_failure_counts": dict(Counter(attempt["provider"] for item in query_diagnostics
+                                                    for attempt in item.get("provider_attempts", [])
+                                                    if not attempt["status"].startswith("SEARCH_OK"))),
+            "provider_fallback_used": any(item.get("provider_fallback_used", False)
+                                          for item in query_diagnostics),
+            "provider_fallback_reason": list(dict.fromkeys(item["provider_fallback_reason"]
+                                            for item in query_diagnostics
+                                            if item.get("provider_fallback_reason")))[:4],
+        }
 
         readable_sources = [source for source in sources if source.ok and source.text]
         if not readable_sources:
+            evidence = [normalize_evidence(source, index, spec, temporal)
+                        for index, source in enumerate(sources, 1)]
+            selected = select_evidence(spec, evidence)
+            plan = build_research_plan(spec, temporal, selected, evidence)
+            _last_research_grounding_debug = research_debug(
+                spec, temporal, evidence, plan, plan.compliance(plan.render()), True)
+            _last_research_grounding_debug.update(acquisition_debug)
+            if acquisition_debug["raw_results_seen"] == 0:
+                answer = ("Die Websuche konnte für diese Anfrage nicht zuverlässig ausgeführt werden."
+                          if acquisition_debug["search_queries_failed"] else
+                          "Ich habe für diese Recherche keine Suchtreffer erhalten.")
+            else:
+                answer = "Ich habe Suchtreffer gefunden, konnte aber keine Quelle zuverlässig auslesen."
             return {
                 "ok": False,
                 "query": query,
-                "answer": "Ich habe Suchtreffer gefunden, konnte aber keine Quelle zuverlässig auslesen.",
-                "sources": serialize_sources(sources),
+                "answer": answer,
+                "sources": [],
                 "memory_id": None,
                 "memory_status": None,
             }
 
-        context = build_research_context(query=query, sources=sources)
+        evidence = [normalize_evidence(source, index, spec, temporal)
+                    for index, source in enumerate(sources, 1)]
+        selected = select_evidence(spec, evidence)
+        plan = build_research_plan(spec, temporal, selected, evidence)
+        fact_sources = [item for item in selected if item.evidence_id in plan.source_ids]
 
         system_prompt = (
-            "Du bist Ava, ein lokaler Recherche-Assistent. "
-            "Fasse Web-Recherche sachlich und knapp zusammen. "
-            "Nutze nur die gelieferten Quellen. "
-            "Trenne klar zwischen gesicherten Informationen und Unsicherheiten. "
-            "Antworte auf Deutsch. "
-            "Wenn Quellen widersprüchlich oder schwach sind, sage das."
+            "Du bist Avas Sprach- und Reasoning-Worker. Formuliere auf Deutsch direkt aus dem "
+            "RESEARCH RESPONSE PLAN. AvaCore hat die Evidenz ausgewählt. "
+            "Erfinde keine Fakten oder aktuellen Werte. Nenne keine abgelehnten Quellen."
         )
-
-        user_prompt = (
-            f"{context}\n\n"
-            "Aufgabe:\n"
-            "1. Beantworte die Recherchefrage kompakt.\n"
-            "2. Liste die wichtigsten gefundenen Fakten.\n"
-            "3. Nenne am Ende die verwendeten Quellen als nummerierte Liste.\n"
-            "4. Erfinde keine Details, die nicht im Quellentext stehen."
-        )
+        user_prompt = f"Recherchefrage: {query}\n\n{plan.prompt(fact_sources)}"
 
         ensure_ollama_runtime()
-        answer = backend.chat(
+        model_answer = backend.chat(
             [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ]
         )
+        compliance = plan.compliance(model_answer)
+        cited_urls = set(re.findall(r"https?://[^\s)\]>]+", model_answer))
+        selected_urls = {item.url for item in fact_sources}
+        rejected_titles = {item.title.casefold() for item in evidence
+                           if item.evidence_id not in plan.source_ids and len(item.title) >= 12}
+        citation_conflict = bool(cited_urls - selected_urls or
+                                 any(title in model_answer.casefold() for title in rejected_titles))
+        compliance["citation_conflict"] = citation_conflict
+        if citation_conflict:
+            compliance["compliant"] = False
+            compliance["forbidden_claim_conflict"] = True
+        fallback_used = not compliance["compliant"] or plan.evidence_conflict
+        answer = plan.render() if fallback_used else model_answer
+        _last_research_grounding_debug = research_debug(spec, temporal, evidence, plan,
+                                                        compliance, fallback_used)
+        _last_research_grounding_debug.update(acquisition_debug)
+        selected_sources = [item.source for item in fact_sources if item.source]
 
         memory_id = None
         should_save = (
@@ -850,7 +972,7 @@ def run_research_workflow(query: str, max_results: int | None = None, save_memor
         if should_save:
             source_refs = "\n".join(
                 f"- {source.title}: {source.url}"
-                for source in sources
+                for source in selected_sources
                 if source.ok
             )
 
@@ -880,7 +1002,13 @@ def run_research_workflow(query: str, max_results: int | None = None, save_memor
                 "activation": 0.85, "priority": 0.75, "persistence": 0.75,
                 "confidence": 0.6, "source_ref": f"research:{memory_id or query[:80]}",
                 "tags": ["research", "web"],
-                "metadata": {"summary": answer, "sources": serialize_sources(sources), "uncertainties": True, "memory_id": memory_id},
+                "metadata": {"summary": answer, "sources": serialize_sources(selected_sources),
+                             "uncertainties": True, "memory_id": memory_id,
+                             "temporal_scope": spec.temporal_scope.value,
+                             "research_mode": spec.research_mode.value,
+                             "evidence_date": spec.target_date.isoformat() if spec.target_date else None,
+                             "temporal_basis": list(dict.fromkeys(f.temporal_basis.value for f in plan.required_facts)),
+                             "volatility": "high" if spec.requires_fresh_evidence else "low"},
             }
             run_workspace_cycle(
                 jspace_path=settings.jspace_path, workspace_path=settings.workspace_path,
@@ -900,7 +1028,7 @@ def run_research_workflow(query: str, max_results: int | None = None, save_memor
             "ok": True,
             "query": query,
             "answer": answer,
-            "sources": serialize_sources(sources),
+            "sources": serialize_sources(selected_sources),
             "memory_id": memory_id,
             "memory_status": "candidate" if memory_id else None,
         }
@@ -2353,6 +2481,11 @@ def research(
         max_results=payload.max_results,
         save_memory=payload.save_memory,
     )
+
+
+@app.get("/debug/research/grounding")
+def debug_research_grounding(_: None = Depends(verify_admin_password)) -> dict:
+    return dict(_last_research_grounding_debug)
 
 
 @app.get("/debug/research_queue")

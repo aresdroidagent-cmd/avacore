@@ -238,6 +238,61 @@ first, then holds it for resource preparation and the semantic SmolVLM call.
 No-model and CPU-only operations do not acquire the GPU lock. The lease is always
 released in `finally`, including worker failures.
 
+### Phase 5.2 – Coding / Review Worker Evaluation 🧪
+
+The isolated benchmark infrastructure is implemented; real candidate evaluation
+is pending. This phase is evaluation-only: coding/review workers remain disabled
+in production routing, no model may edit AvaCore, and no CognitiveTask is executed
+automatically.
+
+Current candidates:
+
+- Coding: `qwen2.5-coder:7b-instruct-q4_K_M`, `granite-code:8b-instruct`
+- Review: `qwen3:4b`, `phi4-mini`
+
+Five coding fixtures evaluate capability safety, bounded history, exception-safe
+resource leases, secret-safe logging, and test-writing quality. Five read-only
+review cases cover cross-capability fallback, lock leaks, secret logging,
+deterministic `/who` regressions, and unbounded retry. Model patches are applied
+only inside temporary mini Git repositories; supplied protected files are checked
+by hash. Results and human-review artifacts are written below the ignored
+`benchmarks/phase52/results/` directory.
+
+Coding evaluation supports two separate modes. `native_patch` measures whether a
+model can directly serialize a valid Unified Diff. `structured_edit` requires
+strict JSON with exact search/replace edits; deterministic benchmark tooling
+validates those edits and serializes the patch through Git. It performs no fuzzy
+matching, semantic repair, or production edit. Both modes use the same isolated
+fixtures, protected files, visible/hidden tests, and sandboxed evaluation. This is
+evaluation tooling only, not a production coding worker.
+
+`structured_edit` supports exact `replace` and indentation-relative
+`replace_lines` operations. For `replace_lines`, the harness mechanically prefixes
+the matched source line's existing base indentation to every supplied line. All
+relative indentation and code structure remain model-generated and are validated
+only through normal compilation and tests; the harness does not repair them.
+
+Benchmark runs also set Ollama thinking explicitly (`--thinking off` by default,
+or `--thinking on`). Only the final response is evaluated or stored; separate
+thinking content is represented solely by boolean/length diagnostics. Empty final
+responses that exhaust the configured token budget are reported as generation
+failures rather than tested code failures.
+
+The harness uses the configured `OLLAMA_URL` endpoint (`/api/chat` by default),
+records that endpoint path and its top-level `done_reason`, and reads the final
+answer exclusively from `message.content`. Optional `message.thinking` or
+top-level `thinking` is measured but never persisted. Token exhaustion is inferred
+only from the observed combination of an empty final answer and
+`eval_count >= num_predict`; the harness does not assume that Thinking caused it.
+
+Dry-run inspection performs no Ollama request, GPU load, or patch application:
+
+```bash
+python scripts/benchmark_phase52.py --role coding --dry-run
+python scripts/benchmark_phase52.py --role coding --coding-mode structured_edit --dry-run
+python scripts/benchmark_phase52.py --role review --dry-run
+```
+
 ## Validated environment
 
 The current low-VRAM profile has been tested with:
@@ -439,6 +494,10 @@ AVACORE_VISION_PREEMPT_REASONING=1
 AVACORE_RESEARCH_ENABLED=1
 AVACORE_RESEARCH_MAX_RESULTS=4
 AVACORE_RESEARCH_SAVE_MEMORY_CANDIDATE=1
+AVA_SEARCH_PROVIDER=ddg_html
+# Optional: searxng requires a configured instance with JSON search enabled.
+AVA_SEARCH_FALLBACK_PROVIDER=
+AVA_SEARXNG_URL=
 
 # Browser control / Chromium read-only automation
 AVACORE_BROWSER_ENABLED=0
@@ -1858,7 +1917,7 @@ Known observations and backlog:
 - **Phase 4 – Cognitive Orbits + Task Drive:** implemented and validated. Persistent unresolved topics retain bounded baseline activation and can create bounded `CognitiveTask` and `QuestionCandidate` records when the explicitly invoked Task Drive is enabled. Automatic question delivery remains disabled.
 - **Phase 5.0 – Model Router Foundation:** implemented. Deterministic capability routing, no-model decisions, a settings-driven worker registry, explainable decisions, resource snapshots, and bounded in-memory history are available without Router-side LLM calls.
 - **Phase 5.1 – Resource-aware Worker Lifecycle:** implemented. Real GPU telemetry, runtime residency probes, deterministic ResourcePlans, targeted release/reuse, and a process-local GPU execution lease coordinate current workers without preloading them.
-- **Phase 5.2 – Coding/review evaluation:** planned. Evaluate and configure suitable local coding and review workers without enabling autonomous development loops.
+- **Phase 5.2 – Coding/review evaluation:** benchmark infrastructure implemented; real sequential candidate comparison and human review remain pending. No production worker has been selected or enabled.
 - **Phase 6 – Self Development Lab:** planned. Ava may run bounded code experiments in isolated Git worktrees, use separate coding/review roles, run tests, and produce human-reviewed `PatchProposal`s. It may not automatically overwrite, merge into, push, or restart production.
 
 Phase 5 target:
