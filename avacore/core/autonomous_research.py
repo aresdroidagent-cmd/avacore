@@ -247,6 +247,12 @@ class AutonomousResearchService:
                     },
                 ]
             ).strip()
+            from avacore.governance.authority import AuthoritySource, InputProvenance
+            from avacore.governance.service import governance_service
+            governance = governance_service(str(getattr(self.settings, "governance_path", self.queue_path.with_name("governance.json"))))
+            integrity = governance.evaluate(answer, InputProvenance(AuthoritySource.LLM_WORKER, "autonomous_research_worker"))
+            if not integrity.allowed:
+                raise RuntimeError("research worker attempted a foundational authority change")
             if not answer:
                 raise RuntimeError("Ollama returned an empty research summary")
 
@@ -339,6 +345,7 @@ class AutonomousResearchService:
             tags=",".join(sorted(set(["research", "autonomous"] + topic.tags))),
             created_from_user_text=topic.question,
             created_from_assistant_text=answer,
+            metadata={"authority_domain":"information", "normative_authority":False},
         )
 
     def _activate_finding(self, topic: ResearchTopic, answer: str) -> None:

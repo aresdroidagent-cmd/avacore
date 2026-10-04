@@ -90,18 +90,28 @@ class SelfModel:
     persistence: float = 1.0
     authority: str = "system"
     confidence: float = 1.0
+    identity: dict[str, str] = field(default_factory=lambda: {"name":"Ava", "runtime":"AvaCore"})
+    primary_human_reference: dict[str, str] = field(default_factory=lambda: {
+        "entity_id":"person:roger", "role":"creator_steward"})
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def load(cls, path: Path | str, **defaults: Any) -> "SelfModel":
+    def load(cls, path: Path | str, *, governance: dict[str, Any] | None = None, **defaults: Any) -> "SelfModel":
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):
             data = {}
         # Configuration is authoritative for deployment identity fields.
         data.update({key: value for key, value in defaults.items() if value is not None})
+        # Core identity and relationship are never loaded from worker/session state.
+        from avacore.governance.relationship import PrimaryHumanReference
+        identity = governance["identity"] if governance else {"name":"Ava", "runtime":"AvaCore"}
+        reference = governance["relationship"] if governance else asdict(PrimaryHumanReference())
+        data.update(identity=dict(identity), primary_human_reference={
+            "entity_id":reference["entity_id"], "role":reference["role"]}, name=identity["name"],
+            system_name=identity["runtime"])
         fields = cls.__dataclass_fields__
         return cls(**{key: value for key, value in data.items() if key in fields})
 

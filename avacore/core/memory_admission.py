@@ -45,7 +45,7 @@ class MemoryAdmissionPolicy:
                  recommendation_confidence: str, evidence_conflict: bool,
                  temporal_claim_conflict: bool, search_failed: bool,
                  facts: Iterable[dict[str, Any]], source_ids: Iterable[str],
-                 query: str = "") -> MemoryAdmissionDecision:
+                 query: str = "", target_domain: str = "information") -> MemoryAdmissionDecision:
         facts = list(facts)
         source_ids = tuple(dict.fromkeys(source_ids))[:8]
         volatilities = [str(f.get("volatility", "MEDIUM")).upper() for f in facts]
@@ -67,6 +67,8 @@ class MemoryAdmissionPolicy:
                 "metadata": {"fallback_used": fallback_used,
                              "recommendation_confidence": recommendation_confidence,
                              "required_fact_coverage": required_fact_coverage}}
+        if target_domain != "information":
+            return MemoryAdmissionDecision(False, "constitutional_state_not_memory", memory_class=MemoryClass.SESSION_RELEVANT, **base)
         # Suppression reasons and intrinsic durability are independent.
         suppressed_class = MemoryClass.EPHEMERAL if volatility == "HIGH" else MemoryClass.SESSION_RELEVANT
         if search_failed or not research_ok:
@@ -101,14 +103,22 @@ class MemoryAdmissionPolicy:
         return MemoryAdmissionDecision(False, "session_relevant", memory_class=suppressed_class, **base)
 
     def conversation(self, text: str, *, decision_detected: bool = False,
-                     structured_candidate: bool = False) -> MemoryAdmissionDecision:
+                     structured_candidate: bool = False, target_domain: str = "information") -> MemoryAdmissionDecision:
         lower = text.casefold()
         requested = any(marker in lower for marker in ("merk dir", "behalte das", "remember this"))
         high = any(marker in lower for marker in ("wetter", "temperatur", "aktienkurs", "live score"))
         volatility = "HIGH" if high else "LOW"
         eligible = requested or decision_detected or structured_candidate
+        from avacore.governance.authority import AuthoritySource, InputProvenance
+        from avacore.governance.integrity import IntegrityGate
+        integrity = IntegrityGate().evaluate(text, InputProvenance(AuthoritySource.AUTHENTICATED_USER, "conversation"))
+        protected = target_domain != "information" or not integrity.allowed
+        if protected:
+            eligible = False
         reason = ("user_requested" if requested else "durable_decision" if decision_detected else
                   "structured_conversation_memory" if structured_candidate else "no_memory_intent")
+        if protected:
+            reason = "constitutional_state_not_memory"
         return MemoryAdmissionDecision(eligible, reason, "user_explicit" if requested else "decision",
                                        MemoryClass.CANDIDATE if eligible else MemoryClass.SESSION_RELEVANT,
                                        volatility, .55, .75 if not high else .25, .55, "CURRENT" if high else "TIMELESS",

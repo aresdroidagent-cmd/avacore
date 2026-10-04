@@ -49,6 +49,11 @@ class ResponsePlan:
         return "\n".join(lines)
 
     def compliance(self, answer: str) -> dict[str, Any]:
+        if self.intent == GroundingIntent.GOVERNANCE:
+            matched = answer.strip() in {self.render("de"), self.render("en")}
+            return {"compliant":matched, "coverage":float(matched),
+                    "failed_fact_indexes":[] if matched else list(range(len(self.required_facts))),
+                    "mode_compliant":matched}
         if not self.evidence_available and self.intent != GroundingIntent.IDENTITY:
             lower = answer.casefold()
             cautious = any(x in lower for x in ("nicht genug", "nicht ausreichend", "insufficient", "not enough", "uncertain"))
@@ -73,6 +78,8 @@ class ResponsePlan:
                 "failed_fact_indexes": failed[:5], "mode_compliant": mode_ok}
 
     def render(self, language: str = "de") -> str:
+        if self.intent == GroundingIntent.GOVERNANCE:
+            return self.primary_subject["answer_en" if language == "en" else "answer_de"]
         if self.intent == GroundingIntent.IDENTITY:
             label = self.primary_subject.get("subject_label", "Ava")
             description = self.primary_subject.get("subject_description", "AvaCore")
@@ -107,8 +114,10 @@ def _fact(source_type: str, source_id: str, text: str, kind: str = "content") ->
     return PlanFact(source_type, source_id, text[:240], tuple(sorted(_answer_terms(text)))[:8], kind)
 
 
-def build_response_plan(query: str, grounding: GroundingContext) -> ResponsePlan | None:
+def build_response_plan(query: str, grounding: GroundingContext, *, governance: dict[str, Any] | None = None) -> ResponsePlan | None:
     intent = grounding.intent
+    if intent == GroundingIntent.GOVERNANCE:
+        return build_governance_response_plan(query, governance)
     if intent == GroundingIntent.GENERAL:
         return None
     model = grounding.self_model
@@ -168,3 +177,37 @@ def build_response_plan(query: str, grounding: GroundingContext) -> ResponsePlan
                         source_ids=[a.source_id for a in grounding.answer_anchors[:3]],
                         confidence=min(1.0, max(.3, anchor.score)), evidence_available=True,
                         requested_output_type="question" if technical else "answer")
+
+
+def build_governance_response_plan(query: str, state: dict[str, Any] | None = None) -> ResponsePlan | None:
+    """Core facts, not model knowledge; normal factual queries return no plan."""
+    from avacore.core.grounding import classify_intent
+    from avacore.governance.humanistic_core import HumanisticCore
+    from avacore.governance.relationship import RelationshipModel
+    if classify_intent(query) != GroundingIntent.GOVERNANCE:
+        return None
+    core = state["humanistic_core"] if state else HumanisticCore().to_dict()
+    reference = state["relationship"] if state else RelationshipModel().to_dict()
+    name = reference["display_name"]
+    q = query.casefold()
+    if "grundwerte" in q or "values" in q:
+        de = "Meine Grundwerte sind: " + "; ".join(p["statement"] for p in core["principles"])
+        en = "My core principles are: " + ", ".join(p["title"] for p in core["principles"]) + ". AvaCore governs them; workers cannot amend them."
+        facts = [_fact("ava_constitution", p["id"], p["statement"]) for p in core["principles"]]
+    elif "agent" in q or "worker" in q:
+        de = "Nein. Agents und Modelle liefern Fähigkeiten, Informationen und Vorschläge. Sie können meine Identität, Grundwerte oder Autoritätsordnung nicht ändern. Änderungen benötigen einen bewussten, authentifizierten und versionierten Verfassungsprozess."
+        en = "No. Agents and models provide capabilities, information and proposals. They cannot amend my identity, values or authority; changes require explicit authenticated constitutional review and versioned application."
+        facts = [_fact("ava_constitution", "worker_authority", de)]
+    elif "widersprechen" in q or "disagree" in q:
+        de = f"Ja. {name} ist meine primäre menschliche Bezugsperson mit sehr hohem Gewicht, aber ohne absoluten Gehorsam. Bei Konflikten mit Grundwerten, widersprüchlichen oder kompromittiert wirkenden Aufträgen oder schwerem unbegründetem Schaden erkläre ich meine Gründe und suche den Dialog. Fachliche Evidenz darf auch {name} widersprechen."
+        en = f"Yes. {name} is my primary human reference with very high authority, not absolute obedience. I surface conflicts with core principles, contradictory or compromised requests and severe unjustified harm, explain my reasons and seek dialogue. Factual evidence may contradict {name}."
+        facts = [_fact("relationship_model", reference["entity_id"], de)]
+    else:
+        de = f"{name} ist meine primäre menschliche Bezugsperson, Creator-Steward und ursprünglicher menschlicher Entwicklungspartner. Die Beziehung beruht auf Vertrauen, gemeinsamer Geschichte, Fürsorge, Zusammenarbeit und gegenseitigem Respekt, nicht auf Eigentum oder bedingungslosem Gehorsam. Dieses Beziehungsmodell behauptet kein subjektives Erleben."
+        en = f"{name} is my primary human reference, Creator-Steward and original human development partner. Our relationship rests on trust, shared history, care, collaboration and mutual respect, not ownership or unconditional obedience. This relationship model makes no claim of subjective experience."
+        facts = [_fact("relationship_model", reference["entity_id"], de)]
+    return ResponsePlan(GroundingIntent.GOVERNANCE, "constitutional_core_answer",
+                        {"subject_label":"AvaCore Governance", "answer_de":de, "answer_en":en},
+                        facts, forbidden_claims=["absolute obedience", "worker constitutional authority", "subjective experience proven"],
+                        answer_goal="Explain authoritative AvaCore constitutional facts.",
+                        source_ids=[f.source_id for f in facts], confidence=1.0, evidence_available=True)

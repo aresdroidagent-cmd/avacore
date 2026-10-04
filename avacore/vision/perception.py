@@ -157,17 +157,28 @@ def _compose_single_person_description(description: str, display_name: str, *,
         visible = f"{display_name} ist sichtbar." if language == "de" else f"{display_name} is visible."
         return visible, "single_fresh_identity_no_description"
     if language == "de":
-        match = re.match(r"^(?:ein|eine|einen|der|die)\s+(?:Person|Frau|Mann)\s+(.+)$",
-                         text, flags=re.IGNORECASE)
-        if not match:
+        # This composition runs only for one canonical scene person. Reuse its
+        # name rather than introducing generic subjects or inferred gender.
+        pronoun_sensitive = bool(re.search(
+            r"\b(?:er|sie|ihn|ihm|sein(?:e|en|em|er|es)?|ihr(?:e|en|em|er|es)?)\b",
+            text, flags=re.IGNORECASE))
+        text = re.sub(r"\b(?:mit|in)\s+(?:sein|ihr)(?:er|en|e)\s+Hand\b",
+                      "in der Hand", text, flags=re.IGNORECASE)
+        genitive_name = display_name + ("'" if display_name[-1:].casefold() in "sxzß" else "s")
+        text = re.sub(r"\b(?:sein|ihr)(?:e|en|em|er|es)?\b(?=\s+[A-ZÄÖÜ])",
+                      lambda _: genitive_name, text)
+        text = re.sub(r"\b(?:ein|eine|der|die)\s+(?:Person|Frau|Mann)\b",
+                      lambda _: display_name, text, flags=re.IGNORECASE)
+        text = re.sub(
+            r"(^|[.!?]\s+|\b(?:während|wobei|obwohl|als|und|aber)\s+)(?:er|sie)\b",
+            lambda m: m.group(1) + display_name, text, flags=re.IGNORECASE)
+        text = re.sub(r"\b(?:ihn|ihm)\b", lambda _: display_name,
+                      text, flags=re.IGNORECASE)
+        if display_name not in text:
             return f"{display_name} ist sichtbar. {text}", "single_fresh_identity_conservative"
-        action = match.group(1)
-        if re.search(r"\b(?:er|sie|ihm|ihr|seine?|ihre?)\b", action, flags=re.IGNORECASE):
-            action = re.sub(r"\b(während|wobei|obwohl|als)\s+(?:er|sie)\b",
-                            r"\1 die Person", action, flags=re.IGNORECASE)
-            return (f"{display_name} ist sichtbar. Die Person {action}",
-                    "single_fresh_identity_pronoun_safe")
-        return f"{display_name} {action}", "single_fresh_identity_action_bound"
+        reason = ("single_fresh_identity_pronoun_safe" if pronoun_sensitive else
+                  "single_fresh_identity_action_bound")
+        return text, reason
     match = re.match(r"^(?:(?:a|the)\s+)?(?:person|man|woman|individual)\s+(.+)$",
                      text, flags=re.IGNORECASE)
     if not match:

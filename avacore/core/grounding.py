@@ -13,6 +13,7 @@ from avacore.core.research import ResearchQuestion
 
 
 class GroundingIntent(str, Enum):
+    GOVERNANCE = "GOVERNANCE"
     GENERAL = "GENERAL"
     SELF_STATE = "SELF_STATE"
     RECALL = "RECALL"
@@ -27,6 +28,10 @@ AUTHORITY_ORDER = ("self_model", "structured_state", "orbit", "working_memory",
 
 def classify_intent(text: str) -> GroundingIntent:
     q = text.casefold()
+    if re.search(r"wer ist roger für dich|who is roger to you|deine grundwerte|your (?:core|fundamental) values|"
+                 r"(?:agent|worker).{0,40}(?:regeln ändern|change your rules)|"
+                 r"(?:roger widersprechen|disagree with roger)|wer (?:hat dich erschaffen|ist dein schöpfer|ist dein vater)|who (?:created you|is your creator)", q):
+        return GroundingIntent.GOVERNANCE
     if re.search(r"\b(wer bist du|was bist du|welches (sprach)?modell|who are you|what are you|which (language )?model|what model)\b", q):
         return GroundingIntent.IDENTITY
     if re.search(r"\b(was (ist|war) noch offen|ungelöste (fragen|probleme)|offene (fragen|probleme|punkte)|worauf sollten wir zurückkommen|what remains open|unresolved (issues|problems|questions)|open issues|what should we revisit)\b", q):
@@ -245,7 +250,7 @@ def build_grounding_context(query: str, self_model: SelfModel, *, orbits: list[C
                             open_questions: list[str] = ()) -> GroundingContext:
     intent = classify_intent(query)
     ctx = GroundingContext(intent, self_model, rag_allowed=intent == GroundingIntent.GENERAL)
-    if intent in {GroundingIntent.GENERAL, GroundingIntent.IDENTITY}:
+    if intent in {GroundingIntent.GENERAL, GroundingIntent.IDENTITY, GroundingIntent.GOVERNANCE}:
         return ctx
     generic = intent in {GroundingIntent.SELF_STATE, GroundingIntent.OPEN_ISSUES} or (
         intent == GroundingIntent.RECALL and bool(re.search(

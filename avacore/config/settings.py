@@ -452,6 +452,7 @@ class Settings:
         self.question_interaction_timezone = os.environ.get("AVA_QUESTION_INTERACTION_TIMEZONE", "Europe/Zurich").strip()
         self.question_interaction_window_start = os.environ.get("AVA_QUESTION_INTERACTION_WINDOW_START", "19:00").strip()
         self.question_interaction_window_end = os.environ.get("AVA_QUESTION_INTERACTION_WINDOW_END", "20:00").strip()
+        self.governance_path = Path(os.environ.get("AVA_GOVERNANCE_PATH", "./data/state/governance.json")).expanduser()
         self.self_model_path = Path(os.environ.get("AVACORE_SELF_MODEL_PATH", "./data/state/self_model.json")).expanduser()
         self.working_memory_max_items = bounded_int("AVACORE_WORKING_MEMORY_MAX_ITEMS", 24, 8, 100)
         self.working_memory_active_items = bounded_int("AVACORE_WORKING_MEMORY_ACTIVE_ITEMS", 10, 2, 32)
