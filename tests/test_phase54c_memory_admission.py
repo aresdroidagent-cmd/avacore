@@ -72,7 +72,12 @@ def test_successful_current_weather_is_ephemeral_and_not_saved(monkeypatch, tmp_
     assert result["ok"] and result["memory_id"] is None
     assert store.list_memory_items() == []
     decision = http_app.memory_admission_observability.last_decision
-    assert decision["memory_class"] == "EPHEMERAL" and decision["reason"] == "high_volatility"
+    assert decision["memory_class"] == "EPHEMERAL"
+    # Stale weather evidence retains its intrinsic class and its specific guard reason.
+    expected_reason = ("insufficient_evidence"
+                       if http_app._last_research_grounding_debug["response_mode"] == "insufficient_current_evidence"
+                       else "high_volatility")
+    assert decision["reason"] == expected_reason
     assert chat.call_count == 1
 
 
@@ -173,3 +178,46 @@ async def test_telegram_memory_marker_only_when_candidate_was_saved(monkeypatch)
     await bot.research_cmd(update, context)
     assert "Memory-Kandidat" not in replies[1]
     assert "Als Memory-Kandidat gespeichert: #17" in replies[3]
+
+
+@pytest.mark.parametrize("guards, reason", [
+    ({}, "high_volatility"),
+    ({"response_mode":"insufficient_current_evidence"}, "insufficient_evidence"),
+    ({"search_failed":True}, "search_failure"),
+    ({"temporal_claim_conflict":True}, "temporal_claim_conflict"),
+    ({"evidence_conflict":True}, "unresolved_evidence_conflict"),
+    ({"recommendation_confidence":"LOW"}, "incomplete_recommendation"),
+])
+def test_high_volatility_preserves_ephemeral_class_under_suppression(guards, reason):
+    decision = policy_research(temporal_scope="CURRENT", facts=[
+        {"fact_id":"weather", "confidence":.9, "volatility":"HIGH",
+         "temporal_basis":"CURRENT_PAGE_MARKER"}], **guards)
+    assert decision.admit is False
+    assert decision.memory_class == MemoryClass.EPHEMERAL
+    assert decision.reason == reason
+
+
+def test_medium_volatility_insufficient_evidence_is_unchanged():
+    decision = policy_research(response_mode="insufficient_current_evidence", facts=[
+        {"fact_id":"medium", "confidence":.9, "volatility":"MEDIUM"}])
+    assert decision.admit is False
+    assert decision.reason == "insufficient_evidence"
+    assert decision.memory_class == MemoryClass.SESSION_RELEVANT
+
+
+def test_low_volatility_timeless_fact_remains_candidate():
+    decision = policy_research()
+    assert decision.admit is True
+    assert decision.memory_class == MemoryClass.CANDIDATE
+    assert decision.reason == "durable_validated_research"
+
+
+@pytest.mark.parametrize("query", ["Wetter heute", "weather", "current temperature",
+                                  "live score", "stock price", "breaking news"])
+@pytest.mark.parametrize("search_failed, reason", [(False, "insufficient_evidence"), (True, "search_failure")])
+def test_volatile_query_without_facts_remains_ephemeral(query, search_failed, reason):
+    decision = policy_research(query=query, facts=[], search_failed=search_failed)
+    assert decision.admit is False
+    assert decision.memory_class == MemoryClass.EPHEMERAL
+    assert decision.volatility == "HIGH"
+    assert decision.reason == reason

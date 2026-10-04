@@ -971,7 +971,7 @@ def run_research_workflow(query: str, max_results: int | None = None, save_memor
                 evidence_conflict=plan.evidence_conflict, temporal_claim_conflict=False,
                 search_failed=bool(acquisition_debug["search_queries_failed"] or
                                    not acquisition_debug["fetch_succeeded"]),
-                facts=[], source_ids=[])
+                facts=[], source_ids=[], query=query)
             memory_admission_observability.record(admission)
             if acquisition_debug["raw_results_seen"] == 0:
                 answer = ("Die Websuche konnte für diese Anfrage nicht zuverlässig ausgeführt werden."
@@ -1049,7 +1049,7 @@ def run_research_workflow(query: str, max_results: int | None = None, save_memor
             recommendation_confidence=plan.recommendation_confidence.value,
             evidence_conflict=plan.evidence_conflict,
             temporal_claim_conflict=bool(compliance.get("temporal_claim_conflict", False)),
-            search_failed=False, facts=admission_facts, source_ids=plan.source_ids)
+            search_failed=False, facts=admission_facts, source_ids=plan.source_ids, query=query)
 
         if should_save and admission.admit:
             source_refs = "\n".join(

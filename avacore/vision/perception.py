@@ -46,6 +46,8 @@ def _track_continuity_score(first: list[int], second: list[int]) -> float:
     """Bounded spatial continuity from overlap or normalized center proximity."""
     overlap = _iou(first, second)
     ax, ay, aw, ah = first; bx, by, bw, bh = second
+    if min(aw, ah, bw, bh) <= 0 or min(aw * ah, bw * bh) / max(aw * ah, bw * bh) < .5:
+        return 0.0
     scale_x, scale_y = max(1.0, float(max(aw, bw))), max(1.0, float(max(ah, bh)))
     dx = abs((ax + aw / 2) - (bx + bw / 2)) / scale_x
     dy = abs((ay + ah / 2) - (by + bh / 2)) / scale_y
@@ -110,18 +112,26 @@ class PerceptionResult:
     track_handover_detected: bool = False
     track_handover_from: str | None = None
     track_handover_to: str | None = None
+    track_handover_identity: str | None = None
     track_handover_reason: str | None = None
     track_continuity_score: float = 0.0
     current_scene_unknown_count: int = 0
     historical_unknown_count: int = 0
+    persons_detected: int = 0
+    temporal_identity_bridge_used: bool = False
+    temporal_identity_bridge_person: str | None = None
+    temporal_identity_bridge_age_seconds: float | None = None
+    temporal_identity_bridge_confidence: float | None = None
+    temporal_identity_bridge_reason: str = "not_needed"
 
 
 _VISIBLE_OBJECT_PATTERNS = {
     "phone": r"\b(?:phone|smartphone|mobile phone)\b",
     "sofa": r"\b(?:sofa|couch)\b",
     "coffee_cup": r"\b(?:coffee\s+cup|coffee\s+mug|cup|mug)\b",
+    "bottle": r"\b(?:water\s+bottle|bottle|wasserflasche|flasche)\b",
     "papers": r"\b(?:paper|papers|documents?)\b",
-    "table": r"\b(?:table|desk)\b",
+    "table": r"\b(?:table|desk|tisch)\b",
     "floor": r"\b(?:floor|ground)\b",
 }
 
@@ -184,6 +194,48 @@ def _anonymous_scene_person(description_en: str, *, frame_id: str,
             "sensor_id":camera_id, "require_fresh_identity":True}
 
 
+def _temporal_identity_candidate(description: str, tracks: dict[str, Any], *,
+                                 camera_id: str, captured_at: str, window: float,
+                                 threshold: float, known_persons: dict[str, str]
+                                 ) -> tuple[dict[str, Any] | None, str]:
+    """A short recognition prior, never refreshed by a visual-only binding."""
+    if window <= 0:
+        return None, "bridge_disabled"
+    # Require an explicit singular visual subject, rejecting plural/count evidence.
+    subjects = re.findall(r"\b(?:person|man|woman|individual|boy|girl|child|baby)\b",
+                          description, flags=re.IGNORECASE)
+    if (len(subjects) != 1 or re.search(
+            r"\b(?:people|persons|men|women|individuals|boys|girls|children|babies|"
+            r"couple|crowd|group|two|three|four|several|multiple|another|second)\b|\b[2-9]\b",
+            description, flags=re.IGNORECASE)):
+        return None, "visual_person_count_not_exactly_one"
+    candidates: dict[str, dict[str, Any]] = {}
+    for track in tracks.values():
+        person_id = track.get("person_id")
+        if person_id not in known_persons or track.get("sensor_id") != camera_id:
+            continue
+        recognition = track.get("recognition") or {}
+        if recognition and (not recognition.get("recognition_attempted") or
+                            recognition.get("recognition_candidate") != person_id):
+            continue
+        try:
+            age = (datetime.fromisoformat(captured_at.replace("Z", "+00:00")) -
+                   datetime.fromisoformat(track["last_seen"].replace("Z", "+00:00"))).total_seconds()
+            confidence = float(recognition.get("recognition_confidence", track.get("confidence", 0)))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (0 <= age <= window and threshold <= confidence <= 1):
+            continue
+        candidate = {"person_id":person_id, "age":age, "confidence":confidence}
+        if person_id not in candidates or age < candidates[person_id]["age"]:
+            candidates[person_id] = candidate
+    if len(candidates) > 1:
+        return None, "competing_recent_canonical_identities"
+    if not candidates:
+        return None, "no_fresh_secure_same_camera_identity"
+    return next(iter(candidates.values())), "single_recent_secure_same_camera_identity"
+
+
 def _extract_scene_structure(description_en: str, persons: list[dict[str, Any]], *,
                              frame_id: str, camera_id: str
                              ) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]]]:
@@ -193,7 +245,7 @@ def _extract_scene_structure(description_en: str, persons: list[dict[str, Any]],
         r"\b(?:cup|mug|glass|bottle)(?:\s*(?:/|\bor\b)\s*(?:cup|mug|glass|bottle)){1,3}\b",
         text)
     objects = [name for name, pattern in _VISIBLE_OBJECT_PATTERNS.items()
-               if re.search(pattern, text) and not (name == "coffee_cup" and ambiguous_match)][:12]
+               if re.search(pattern, text) and not (name in {"coffee_cup", "bottle"} and ambiguous_match)][:12]
     object_details: list[dict[str, Any]] = []
     if ambiguous_match:
         raw_label = ambiguous_match.group(0)
@@ -236,6 +288,12 @@ def _extract_scene_structure(description_en: str, persons: list[dict[str, Any]],
             if surface_id in objects and re.search(
                     rf"\b{object_pattern}\b[^.]{{0,45}}\b(?:is|are|lies?|rests?|sits?|stands?)?\s*on\b[^.]{{0,25}}\b(?:the\s+)?{surface_pattern}\b", text):
                 add(object_id, "ON", surface_id)
+    if "bottle" in objects and "table" in objects and re.search(
+            r"\b(?:(?:water\s+)?bottle\s+(?:(?:is|lies|rests|sits|stands)\s+)?"
+            r"on\s+(?:(?:a|the)\s+)?(?:table|desk)|"
+            r"(?:wasserflasche|flasche)\s+(?:(?:ist|liegt|steht)\s+)?"
+            r"auf\s+(?:(?:dem|einem)\s+)?tisch)\b", text):
+        add("bottle", "ON", "table")
     if ambiguous_match:
         for surface_id, surface_pattern in (("table", r"(?:table|desk)"), ("floor", r"(?:floor|ground)")):
             if surface_id in objects and re.search(
@@ -288,7 +346,10 @@ class CameraPerceptionService:
         age = _age_seconds(perception.get("last_perception"))
         perception["fresh"] = age is not None and age <= self.settings.perception_freshness_seconds
         perception["age_seconds"] = age
-        perception["persons_detected"] = len(perception.get("persons") or [])
+        for key in ("used", "person", "age_seconds", "confidence", "reason"):
+            name = f"temporal_identity_bridge_{key}"
+            perception.setdefault(name, PerceptionResult.__dataclass_fields__[name].default)
+        perception.setdefault("persons_detected", len(perception.get("persons") or []))
         perception["capture_timestamp"] = perception.get("last_capture") or perception.get("captured_at")
         perception["tracks_active"] = [key for key, value in graph.get("tracks", {}).items()
                                         if key.startswith("camera_primary:") and value.get("present")]
@@ -325,6 +386,13 @@ class CameraPerceptionService:
             scene_path = image_path
         boxes = self.detector(scene_path)
         graph = self.continuum._graph(); tracks = graph.get("tracks", {})
+        recognition_history = dict(graph.get("local_recognition_history") or {})
+        # Preserve secure observations even if the same track later changes identity.
+        for track in tracks.values():
+            person_id = track.get("person_id")
+            if person_id in self.settings.known_persons and track.get("sensor_id") == camera_id:
+                history_key = f"{camera_id}:{person_id}"
+                recognition_history.setdefault(history_key, dict(track))
         active = {key: value for key, value in tracks.items() if value.get("present") and value.get("sensor_id", "camera_primary") == "camera_primary"}
         used: set[str] = set(); evidence: list[dict[str, Any]] = []
         resolved_in_frame: set[str] = set()
@@ -363,7 +431,7 @@ class CameraPerceptionService:
                         "recognition_candidate":getattr(decision, "top_label", decision.identity),
                         "recognition_confidence":decision.confidence,
                         "recognition_reason":getattr(decision, "reason", "recognition completed")})
-                    if person_id in resolved_in_frame:
+                    if person_id in resolved_in_frame and not include_scene:
                         person_id = None
                     elif person_id:
                         resolved_in_frame.add(person_id)
@@ -382,17 +450,20 @@ class CameraPerceptionService:
                              "sensor_id":"camera_primary", "recognition":recognition})
         track_handover_detected = False
         track_handover_from = track_handover_to = track_handover_reason = None
+        track_handover_identity = None
         track_continuity_score = 0.0
         if len(boxes) == len(evidence) == 1 and evidence[0].get("person_entity_id"):
             current_track = evidence[0]["track_id"]
             current_box = evidence[0]["bounding_box"]
-            freshness_window = min(10.0, max(1.0, float(self.settings.perception_freshness_seconds)))
+            freshness_window = float(getattr(self.settings, "perception_handover_max_age_seconds", 3.0))
             candidates = []
-            for old_track, old in active.items():
+            for old_track, old in tracks.items():
                 old_person = str(old.get("person_id") or "")
                 age = _age_seconds(old.get("last_seen"))
                 old_box = old.get("bounding_box") or []
-                if (old_track == current_track or old_track in used or
+                if (current_track in tracks or old_track == current_track or old_track in used or
+                        old.get("persons_detected", cached.get("persons_detected")) != 1 or
+                        old.get("handover_to") or
                         not old_person.startswith("unknown_person:") or
                         old.get("sensor_id", camera_id) != camera_id or
                         age is None or age > freshness_window or len(old_box) != 4):
@@ -400,11 +471,12 @@ class CameraPerceptionService:
                 score = _track_continuity_score(old_box, current_box)
                 if score >= .35:
                     candidates.append((score, old_track))
-            if candidates:
+            if len(candidates) == 1:
                 track_continuity_score, track_handover_from = max(candidates)
                 track_handover_to = current_track
                 track_handover_reason = "single_current_person_recent_spatial_unknown_to_canonical"
                 track_handover_detected = True
+                track_handover_identity = evidence[0]["person_entity_id"]
                 tracks[track_handover_from]["present"] = False
                 tracks[track_handover_from]["handover_to"] = track_handover_to
                 tracks[track_handover_from]["retired_reason"] = "track_handover"
@@ -421,6 +493,11 @@ class CameraPerceptionService:
         object_details: list[dict[str, Any]] = []
         scene_persons = _deduplicate_scene_persons(evidence)
         description_at = None
+        bridge = {"temporal_identity_bridge_used":False,
+                  "temporal_identity_bridge_person":None,
+                  "temporal_identity_bridge_age_seconds":None,
+                  "temporal_identity_bridge_confidence":None,
+                  "temporal_identity_bridge_reason":"not_needed"}
         if include_scene and self.settings.vision_enabled:
             lease = self.vision_lease() if self.vision_lease is not None else nullcontext()
             with lease:
@@ -445,6 +522,25 @@ class CameraPerceptionService:
                 if anonymous:
                     scene_persons = [anonymous]
                     identity_binding_reason = "anonymous_visual_person"
+            if not boxes and not used and len(scene_persons) == 1:
+                candidate, bridge_reason = _temporal_identity_candidate(
+                    description_en, {**recognition_history, **tracks}, camera_id=camera_id, captured_at=captured_at,
+                    window=getattr(self.settings, "perception_identity_bridge_seconds", 20.0),
+                    threshold=self.settings.person_confidence_threshold,
+                    known_persons=self.settings.known_persons)
+                bridge["temporal_identity_bridge_reason"] = bridge_reason
+                if candidate:
+                    person_id = candidate["person_id"]
+                    scene_persons[0].update({"person_id":person_id,
+                        "person_entity_id":f"person:{person_id}",
+                        "display_name":self.settings.known_persons[person_id],
+                        "binding_status":"temporal_identity_bridge",
+                        "identity_status":"temporal_identity_bridge",
+                        "identity_source":"local_recognition_history"})
+                    bridge.update({"temporal_identity_bridge_used":True,
+                        "temporal_identity_bridge_person":f"person:{person_id}",
+                        "temporal_identity_bridge_age_seconds":candidate["age"],
+                        "temporal_identity_bridge_confidence":candidate["confidence"]})
             presentation_language = "de" if scene_language.strip().lower().startswith("de") else "en"
             if presentation_language == "de" and description_en and self.translator is not None:
                 lease = self.translation_lease() if self.translation_lease is not None else nullcontext()
@@ -467,34 +563,42 @@ class CameraPerceptionService:
                 description_en, scene_persons, frame_id=frame_id, camera_id=camera_id)
             description_at = _utc_now()
         perceived_at = _utc_now()
+        identity_source = "local_recognition_history" if bridge["temporal_identity_bridge_used"] else "local_recognition"
         scene_observation = {"frame_id":frame_id, "camera_id":camera_id,
             "captured_at":captured_at, "perceived_at":perceived_at,
             "description_en":description_en, "description_de":description_de,
             "final_description":description, "identity_enriched":identity_enriched,
             "identity_binding_reason":identity_binding_reason,
-            "identity_source":"local_recognition", "persons":scene_persons,
+            "identity_source":identity_source, "persons":scene_persons, **bridge,
             "scene_person_count":len(scene_persons),
             "canonical_person_count":len({x["person_entity_id"] for x in scene_persons
                                            if x.get("person_entity_id")}),
             "track_handover_detected":track_handover_detected,
             "track_handover_from":track_handover_from, "track_handover_to":track_handover_to,
+            "track_handover_identity":track_handover_identity,
             "track_handover_reason":track_handover_reason,
+            "persons_detected":len(boxes),
+            "current_scene_unknown_count":sum(not x.get("person_entity_id") for x in scene_persons),
             "track_continuity_score":track_continuity_score,
             "objects":objects, "object_details":object_details, "relations":relations}
         self.continuum.observe(VisualObservation(description or f"Camera perception: {len(evidence)} person(s)",
             persons=scene_persons, objects=objects, relations=relations, confidence=.8,
-            timestamp=perceived_at), session_id=session_id)
+            timestamp=perceived_at), session_id=session_id, track_evidence=evidence or None)
         graph = self.continuum._graph()
         current_scene_unknown_count = sum(1 for item in scene_persons
                                           if not item.get("person_entity_id"))
         historical_unknown_count = sum(1 for person in self.continuum.persons().values()
                                        if not person.known and not person.current_presence)
+        # Track presence is frame-local, independent of canonical person presence.
+        for key, track in graph.get("tracks", {}).items():
+            if track.get("sensor_id", camera_id) == camera_id:
+                track["present"] = key in used
         for item in evidence:
-            track = graph.get("tracks", {}).get(item["track_id"], {})
+            track = graph.setdefault("tracks", {}).setdefault(item["track_id"], {})
             track.update({"track_id":item["track_id"], "sensor_id":"camera_primary",
                           "first_seen":track.get("first_seen") or perceived_at,
                           "last_seen":perceived_at, "present":True,
-                          "bounding_box":item["bounding_box"]})
+                          "bounding_box":item["bounding_box"], "persons_detected":len(boxes)})
         result = PerceptionResult(captured_at, perceived_at, str(image_path), str(scene_path), scene_persons,
             [x["track_id"] for x in evidence], sorted({x["person_id"] for x in evidence if x["person_id"]}),
             description, description_at, False, reason, description_en, description_de,
@@ -504,14 +608,26 @@ class CameraPerceptionService:
             len(scene_persons), len({x["person_entity_id"] for x in scene_persons
                                     if x.get("person_entity_id")}),
             objects, relations, scene_observation)
+        result.identity_source = identity_source
+        for key, value in bridge.items():
+            setattr(result, key, value)
+        result.persons_detected = len(boxes)
         result.object_details = object_details
         result.track_handover_detected = track_handover_detected
         result.track_handover_from = track_handover_from
         result.track_handover_to = track_handover_to
+        result.track_handover_identity = track_handover_identity
         result.track_handover_reason = track_handover_reason
         result.track_continuity_score = track_continuity_score
         result.current_scene_unknown_count = current_scene_unknown_count
         result.historical_unknown_count = historical_unknown_count
+        for item in evidence:
+            if item.get("person_entity_id"):
+                recognition_history[f"{camera_id}:{item['person_id']}"] = {
+                    "person_id":item["person_id"], "sensor_id":camera_id,
+                    "last_seen":perceived_at, "confidence":item["confidence"],
+                    "recognition":dict(item["recognition"])}
+        graph["local_recognition_history"] = recognition_history
         graph["next_track_id"] = next_id
         graph["perception"] = {"last_capture":captured_at, "last_perception":perceived_at, **asdict(result)}
         self.continuum._write(self.continuum.persons_path, graph)

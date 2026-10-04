@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum
+import re
 from typing import Any, Iterable
 
 
@@ -43,10 +44,16 @@ class MemoryAdmissionPolicy:
                  plan_compliance: bool, fallback_used: bool, required_fact_coverage: float,
                  recommendation_confidence: str, evidence_conflict: bool,
                  temporal_claim_conflict: bool, search_failed: bool,
-                 facts: Iterable[dict[str, Any]], source_ids: Iterable[str]) -> MemoryAdmissionDecision:
+                 facts: Iterable[dict[str, Any]], source_ids: Iterable[str],
+                 query: str = "") -> MemoryAdmissionDecision:
         facts = list(facts)
         source_ids = tuple(dict.fromkeys(source_ids))[:8]
         volatilities = [str(f.get("volatility", "MEDIUM")).upper() for f in facts]
+        # Rejected/missing current facts must not erase a volatile query's class.
+        if re.search(r"\b(?:weather|wetter|(?:current\s+)?temperature|temperatur|"
+                     r"live\s+score|stock\s+price|aktienkurs|breaking\s+news)\b",
+                     query, flags=re.IGNORECASE):
+            volatilities.append("HIGH")
         volatility = ("HIGH" if "HIGH" in volatilities else "MEDIUM" if "MEDIUM" in volatilities else "LOW")
         durable = [f for f in facts if str(f.get("volatility", "MEDIUM")).upper() == "LOW" or
                    str(f.get("temporal_basis", "")) in {"VALIDITY_INTERVAL", "TIMELESS_FACT"}]
@@ -60,27 +67,29 @@ class MemoryAdmissionPolicy:
                 "metadata": {"fallback_used": fallback_used,
                              "recommendation_confidence": recommendation_confidence,
                              "required_fact_coverage": required_fact_coverage}}
+        # Suppression reasons and intrinsic durability are independent.
+        suppressed_class = MemoryClass.EPHEMERAL if volatility == "HIGH" else MemoryClass.SESSION_RELEVANT
         if search_failed or not research_ok:
-            return MemoryAdmissionDecision(False, "search_failure", memory_class=MemoryClass.SESSION_RELEVANT,
+            return MemoryAdmissionDecision(False, "search_failure", memory_class=suppressed_class,
                                            **base)
         if not facts:
-            return MemoryAdmissionDecision(False, "insufficient_evidence", memory_class=MemoryClass.SESSION_RELEVANT,
+            return MemoryAdmissionDecision(False, "insufficient_evidence", memory_class=suppressed_class,
                                            **base)
         if response_mode == "insufficient_current_evidence":
-            return MemoryAdmissionDecision(False, "insufficient_evidence", memory_class=MemoryClass.SESSION_RELEVANT,
+            return MemoryAdmissionDecision(False, "insufficient_evidence", memory_class=suppressed_class,
                                            **base)
         if temporal_claim_conflict:
-            return MemoryAdmissionDecision(False, "temporal_claim_conflict", memory_class=MemoryClass.SESSION_RELEVANT,
+            return MemoryAdmissionDecision(False, "temporal_claim_conflict", memory_class=suppressed_class,
                                            **base)
         if evidence_conflict:
             return MemoryAdmissionDecision(False, "unresolved_evidence_conflict",
-                                           memory_class=MemoryClass.SESSION_RELEVANT, **base)
+                                           memory_class=suppressed_class, **base)
         if recommendation_confidence in {"LOW", "INSUFFICIENT"}:
             return MemoryAdmissionDecision(False, "incomplete_recommendation",
-                                           memory_class=MemoryClass.SESSION_RELEVANT, **base)
+                                           memory_class=suppressed_class, **base)
         if not plan_compliance and not durable:
             return MemoryAdmissionDecision(False, "noncompliant_without_durable_facts",
-                                           memory_class=MemoryClass.SESSION_RELEVANT, **base)
+                                           memory_class=suppressed_class, **base)
         if volatility == "HIGH":
             return MemoryAdmissionDecision(False, "high_volatility", memory_class=MemoryClass.EPHEMERAL, **base)
         if temporal_scope == "TIMELESS" and volatility == "LOW" and evidence_quality >= .35:
@@ -89,7 +98,7 @@ class MemoryAdmissionPolicy:
         if durability >= .8 and evidence_quality >= .35:
             return MemoryAdmissionDecision(True, "durable_validated_facts",
                                            memory_class=MemoryClass.CANDIDATE, **base)
-        return MemoryAdmissionDecision(False, "session_relevant", memory_class=MemoryClass.SESSION_RELEVANT, **base)
+        return MemoryAdmissionDecision(False, "session_relevant", memory_class=suppressed_class, **base)
 
     def conversation(self, text: str, *, decision_detected: bool = False,
                      structured_candidate: bool = False) -> MemoryAdmissionDecision:

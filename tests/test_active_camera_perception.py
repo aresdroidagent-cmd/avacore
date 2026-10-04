@@ -327,6 +327,7 @@ def test_recent_spatial_unknown_track_hands_over_to_new_canonical_track(tmp_path
     assert first.identities_resolved == []
     assert second.identities_resolved == ["roger"]
     assert second.track_handover_detected is True
+    assert second.temporal_identity_bridge_used is False
     assert second.track_handover_from == first.tracks_active[0]
     assert second.track_handover_to == second.tracks_active[0]
     assert second.current_scene_unknown_count == 0
@@ -701,3 +702,284 @@ def test_recognition_failure_is_visible_in_track_diagnostics(tmp_path):
     assert detail["recognition_attempted"] is True
     assert "face model unavailable" in detail["recognition_reason"]
     assert detail["identity_resolved"] is None
+
+
+def test_canonical_duplicate_detection_preserves_tracks_but_not_extra_scene_person(tmp_path):
+    service = perception(tmp_path, [[10, 10, 100, 200], [15, 10, 100, 200]],
+                         [("roger", .96), ("roger", .95)],
+                         descriptions=["A person is sitting on a sofa."])
+    service.translator = lambda _: "Eine Person sitzt auf einem Sofa."
+    result = service.request(reason="see_command", force=True, include_scene=True, scene_language="de")
+    assert result.scene_person_count == result.canonical_person_count == 1
+    assert result.current_scene_unknown_count == 0
+    assert len(result.tracks_active) == result.persons_detected == 2
+    graph = service.continuum._graph()
+    assert all(graph["tracks"][key]["person_id"] == "roger" for key in result.tracks_active)
+    assert len(graph["last_observation"]["persons"]) == 1
+    assert service.state()["persons_detected"] == 2
+    assert len(result.relations) == 1
+    assert result.relations[0]["subject_id"] == "person:roger"
+    assert (result.vision_model_calls, result.translation_model_calls, result.reasoning_model_calls) == (1, 1, 0)
+    assert "Unbekannte Personen" not in result.scene_description
+
+
+def test_true_current_second_person_survives_single_person_vlm_wording(tmp_path):
+    service = perception(tmp_path, [[10, 10, 100, 200], [300, 10, 100, 200]],
+                         [("roger", .96), ("unknown", .5)], descriptions=["A person is visible."])
+    result = service.request(reason="see_command", force=True, include_scene=True)
+    assert (result.scene_person_count, result.canonical_person_count, result.current_scene_unknown_count) == (2, 1, 1)
+    assert not result.track_handover_detected
+
+
+@pytest.mark.parametrize("age,expected", [(1, True), (30, False)])
+def test_handover_uses_bounded_window_and_preserves_unknown_history(tmp_path, monkeypatch, age, expected):
+    from datetime import datetime, timezone
+    now = datetime(2026, 10, 4, tzinfo=timezone.utc).timestamp()
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromtimestamp(now, tz)
+    monkeypatch.setattr("avacore.vision.perception.datetime", Clock)
+    service = perception(tmp_path, [[10, 10, 100, 200]], [("unknown", .92), ("roger", .94)])
+    first = service.request(reason="see_command", force=True, include_scene=True)
+    now += age
+    service.detector = lambda _: [[75, 10, 100, 200]]
+    result = service.request(reason="see_command", force=True, include_scene=True)
+    assert result.track_handover_detected is expected
+    assert result.track_handover_identity == ("person:roger" if expected else None)
+    assert result.current_scene_unknown_count == 0
+    assert result.historical_unknown_count == 1
+    old = service.continuum._graph()["tracks"][first.tracks_active[0]]
+    assert not old["present"]
+    assert old["person_id"].startswith("unknown_person:")
+    state = service.state()
+    for key in ("track_handover_detected", "track_handover_from", "track_handover_to",
+                "track_handover_identity", "track_handover_reason", "current_scene_unknown_count",
+                "historical_unknown_count", "scene_person_count", "canonical_person_count"):
+        assert state[key] == getattr(result, key)
+
+
+def test_disappeared_canonical_track_is_historical_even_if_person_remains(tmp_path):
+    service = perception(tmp_path, [[10, 10, 100, 200]], [("roger", .96), ("roger", .96)])
+    first = service.request(reason="see_command", force=True, include_scene=True)
+    service.detector = lambda _: [[350, 10, 100, 200]]
+    second = service.request(reason="see_command", force=True, include_scene=True)
+    assert service.state()["tracks_active"] == second.tracks_active
+    assert not service.continuum._graph()["tracks"][first.tracks_active[0]]["present"]
+    assert second.scene_person_count == 1
+
+
+def test_anonymous_relation_is_replaced_by_current_canonical_relation(tmp_path):
+    service = perception(tmp_path, [], [("roger", .96)],
+                         descriptions=["A person is sitting on a sofa."] * 2)
+    first = service.request(reason="see_command", force=True, include_scene=True)
+    assert first.relations[0]["subject_id"].startswith("scene_person:")
+    service.detector = lambda _: [[10, 10, 100, 200]]
+    second = service.request(reason="see_command", force=True, include_scene=True)
+    assert len(second.relations) == 1
+    assert second.relations[0]["subject_id"] == "person:roger"
+    assert service.state()["last_scene_observation"]["relations"] == second.relations
+    assert second.current_scene_unknown_count == 0
+
+
+@pytest.mark.parametrize("reason", ["idcheck", "who_command"])
+def test_non_scene_duplicate_identity_policy_and_model_calls_unchanged(tmp_path, reason):
+    service = perception(tmp_path, [[10, 10, 100, 200], [15, 10, 100, 200]],
+                         [("roger", .96), ("roger", .95)])
+    result = service.request(reason=reason, force=True)
+    assert [x["person_id"] for x in result.persons] == ["roger", None]
+    assert (result.vision_model_calls, result.translation_model_calls, result.reasoning_model_calls) == (0, 0, 0)
+
+
+def test_recently_disappeared_unknown_can_handover_after_empty_frame(tmp_path):
+    service = perception(tmp_path, [[10, 10, 100, 200]], [("unknown", .92), ("roger", .94)])
+    first = service.request(reason="see_command", force=True, include_scene=True)
+    service.detector = lambda _: []
+    service.request(reason="see_command", force=True, include_scene=True)
+    service.detector = lambda _: [[75, 10, 100, 200]]
+    result = service.request(reason="see_command", force=True, include_scene=True)
+    assert result.track_handover_detected
+    assert result.track_handover_from == first.tracks_active[0]
+
+
+def test_same_center_with_incompatible_box_scale_is_not_continuity():
+    from avacore.vision.perception import _track_continuity_score
+    assert _track_continuity_score([0, 0, 100, 200], [40, 80, 20, 40]) == 0
+
+
+def test_handover_requires_configured_identity_threshold(tmp_path):
+    service = perception(tmp_path, [[10, 10, 100, 200]], [("unknown", .92), ("roger", .79)])
+    service.request(reason="see_command", force=True, include_scene=True)
+    service.detector = lambda _: [[75, 10, 100, 200]]
+    result = service.request(reason="see_command", force=True, include_scene=True)
+    assert not result.track_handover_detected
+    assert result.canonical_person_count == 0
+    assert result.current_scene_unknown_count == 1
+
+
+def bridge_sequence(tmp_path, monkeypatch, *, age=16, description=None, language="de"):
+    import avacore.vision.perception as module
+    from datetime import datetime, timedelta, timezone
+    clock = datetime(2026, 10, 4, 13, 4, 59, tzinfo=timezone.utc)
+    monkeypatch.setattr(module, "_utc_now", lambda: clock.isoformat())
+    service = perception(tmp_path, [[10, 10, 100, 200]], [("roger", .95)],
+        descriptions=[description or "man holding phone next to couch with clutter on floor."])
+    service.translator = lambda _: "Ein Mann hält das Telefon neben dem Sofa mit Unordnung auf dem Boden."
+    first = service.request(reason="idcheck", force=True)
+    original_person = service.continuum.persons()["roger"]
+    memory_flags = []
+    assimilate = service.continuum.assimilate
+    def record_assimilation(*args, **kwargs):
+        memory_flags.append(kwargs.get("memory", False))
+        return assimilate(*args, **kwargs)
+    monkeypatch.setattr(service.continuum, "assimilate", record_assimilation)
+    service.bridge_memory_flags = memory_flags
+    clock += timedelta(seconds=age)
+    service.detector = lambda _: []
+    result = service.request(reason="see_command", force=True, include_scene=True, scene_language=language)
+    return service, first, result, original_person
+
+
+def test_temporal_bridge_exact_real_sequence(tmp_path, monkeypatch):
+    service, first, result, original = bridge_sequence(tmp_path, monkeypatch)
+    assert first.captured_at == "2026-10-04T13:04:59+00:00"
+    assert result.captured_at == "2026-10-04T13:05:15+00:00"
+    assert result.temporal_identity_bridge_used
+    assert result.temporal_identity_bridge_person == "person:roger"
+    assert result.temporal_identity_bridge_age_seconds == 16
+    assert result.temporal_identity_bridge_confidence == .95
+    assert result.persons_detected == 0 and result.tracks_active == []
+    assert result.identities_resolved == []
+    assert (result.scene_person_count, result.canonical_person_count, result.current_scene_unknown_count) == (1, 1, 0)
+    assert result.persons[0]["binding_status"] == "temporal_identity_bridge"
+    assert result.identity_source == "local_recognition_history" and result.identity_enriched
+    assert result.final_description.startswith("Roger hält das Telefon")
+    assert (result.vision_model_calls, result.translation_model_calls, result.reasoning_model_calls) == (1, 1, 0)
+    assert {(r["subject_id"], r["predicate"], r["object_id"]) for r in result.relations} >= {
+        ("person:roger", "NEAR", "sofa"), ("person:roger", "HOLDING", "phone")}
+    assert len(result.relations) == len({(r["subject_id"], r["predicate"], r["object_id"]) for r in result.relations})
+    assert service.continuum.persons()["roger"] == original
+    assert not any(service.bridge_memory_flags)
+    for key in ("used", "person", "age_seconds", "confidence", "reason"):
+        name = "temporal_identity_bridge_" + key
+        assert service.state()[name] == getattr(result, name)
+
+
+@pytest.mark.parametrize("age", [21, -1])
+def test_temporal_bridge_expired_or_future(tmp_path, monkeypatch, age):
+    _, _, result, _ = bridge_sequence(tmp_path, monkeypatch, age=age)
+    assert not result.temporal_identity_bridge_used
+    assert result.persons[0]["binding_status"] == "anonymous_visual"
+    assert result.canonical_person_count == 0
+
+
+@pytest.mark.parametrize("description", ["two men holding phones", "a man and a woman next to couch",
+    "a person next to two people", "a man with another child"])
+def test_temporal_bridge_multiple_visual_people(tmp_path, monkeypatch, description):
+    _, _, result, _ = bridge_sequence(tmp_path, monkeypatch, description=description)
+    assert not result.temporal_identity_bridge_used
+    assert result.canonical_person_count == 0
+
+
+def test_temporal_bridge_candidate_guards():
+    from avacore.vision.perception import _temporal_identity_candidate
+    tracks = {"a": {"person_id":"roger", "sensor_id":"camera_primary",
+                     "last_seen":"2026-10-04T13:05:05Z", "confidence":.95}}
+    def candidate():
+        return _temporal_identity_candidate("a man holding phone", tracks,
+            camera_id="camera_primary", captured_at="2026-10-04T13:05:15Z",
+            window=20, threshold=.8, known_persons={"roger":"Roger", "alice":"Alice"})
+    assert candidate()[0]["person_id"] == "roger"
+    tracks["b"] = {**tracks["a"], "person_id":"alice", "last_seen":"2026-10-04T13:05:10Z"}
+    assert candidate() == (None, "competing_recent_canonical_identities")
+    del tracks["b"]
+    tracks["a"]["sensor_id"] = "other_camera"
+    assert candidate()[0] is None
+    tracks["a"]["sensor_id"] = "camera_primary"
+    tracks["a"]["confidence"] = .79
+    assert candidate()[0] is None
+
+
+def test_temporal_bridge_capture_time_and_no_renewal(tmp_path, monkeypatch):
+    import avacore.vision.perception as module
+    service, _, result, original = bridge_sequence(tmp_path, monkeypatch)
+    monkeypatch.setattr(module, "_utc_now", lambda: "2026-10-04T13:05:20Z")
+    def describe(*args, **kwargs):
+        monkeypatch.setattr(module, "_utc_now", lambda: "2026-10-04T13:06:20Z")
+        return "a man holding phone"
+    service.describer = describe
+    expired = service.request(reason="see_command", force=True, include_scene=True)
+    assert not expired.temporal_identity_bridge_used
+    assert service.continuum.persons()["roger"].last_seen == original.last_seen
+    monkeypatch.setattr(module, "_utc_now", lambda: "2026-10-04T13:05:15Z")
+    delayed = service.request(reason="see_command", force=True, include_scene=True)
+    assert delayed.temporal_identity_bridge_used
+    assert delayed.temporal_identity_bridge_age_seconds == 16
+
+
+def test_current_local_recognition_does_not_use_temporal_bridge(tmp_path):
+    service = perception(tmp_path, [[10, 10, 100, 200]], [("roger", .95)],
+                         descriptions=["a man holding phone"])
+    result = service.request(reason="see_command", force=True, include_scene=True)
+    assert result.persons[0]["binding_status"] == "confirmed_local"
+    assert not result.temporal_identity_bridge_used
+
+
+def test_temporal_bridge_competing_identities_on_same_track(tmp_path, monkeypatch):
+    import avacore.vision.perception as module
+    clock = "2026-10-04T13:05:05Z"
+    monkeypatch.setattr(module, "_utc_now", lambda: clock)
+    service = perception(tmp_path, [[10, 10, 100, 200]], [("roger", .95), ("alice", .95)],
+                         descriptions=["a man holding phone"])
+    service.settings.known_persons["alice"] = "Alice"
+    # Register Alice in the existing canonical registry through its normal setup.
+    service.continuum = ContinuumService(tmp_path / "continuum.json", tmp_path / "workspace.json",
+        tmp_path / "working.json", tmp_path / "history.json", tmp_path / "persons.json",
+        known_persons={"roger":"Roger", "alice":"Alice"}, confidence_threshold=.8)
+    service.request(reason="idcheck", force=True)
+    clock = "2026-10-04T13:05:10Z"
+    service.request(reason="idcheck", force=True)
+    clock = "2026-10-04T13:05:15Z"
+    service.detector = lambda _: []
+    result = service.request(reason="see_command", force=True, include_scene=True)
+    assert not result.temporal_identity_bridge_used
+    assert result.temporal_identity_bridge_reason == "competing_recent_canonical_identities"
+    assert result.canonical_person_count == 0
+
+
+@pytest.mark.parametrize("description", ["water bottle", "bottle", "Flasche", "Wasserflasche"])
+def test_bottle_normalization(description):
+    from avacore.vision.perception import _extract_scene_structure
+    objects, relations, details = _extract_scene_structure(description, [], frame_id="test", camera_id="camera_primary")
+    assert objects == ["bottle"]
+    assert not relations
+    assert details[0]["uncertain"] is False
+
+
+@pytest.mark.parametrize("description", ["water bottle on table", "bottle on table",
+    "A water bottle is on the table.", "Flasche auf dem Tisch", "Wasserflasche auf dem Tisch",
+    "Roger sitzt neben dem Sofa mit einer Wasserflasche auf dem Tisch."])
+def test_bottle_explicit_on_table(description):
+    from avacore.vision.perception import _extract_scene_structure
+    objects, relations, _ = _extract_scene_structure(description, [], frame_id="test", camera_id="camera_primary")
+    assert "bottle" in objects and "table" in objects
+    assert [(r["subject_id"], r["predicate"], r["object_id"]) for r in relations] == [("bottle", "ON", "table")]
+
+
+@pytest.mark.parametrize("description", ["a bottle is visible", "a bottle is visible near a table",
+    "a bottle is not on the table", "Eine Wasserflasche ist neben dem Tisch sichtbar."])
+def test_bottle_does_not_infer_on_table(description):
+    from avacore.vision.perception import _extract_scene_structure
+    objects, relations, _ = _extract_scene_structure(description, [], frame_id="test", camera_id="camera_primary")
+    assert "bottle" in objects
+    assert not relations
+
+
+def test_bottle_cup_glass_uncertainty_is_preserved():
+    from avacore.vision.perception import _extract_scene_structure
+    objects, relations, details = _extract_scene_structure("bottle/cup/glass on table", [],
+        frame_id="test", camera_id="camera_primary")
+    assert objects == ["drink_container", "table"]
+    assert details[0]["uncertain"] is True
+    assert details[0]["candidate_labels"] == ["bottle", "coffee_cup", "glass"]
+    assert [(r["subject_id"], r["predicate"], r["object_id"]) for r in relations] == [("drink_container", "ON", "table")]

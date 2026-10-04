@@ -315,7 +315,8 @@ class ContinuumService:
             self.remove_relation(relation.subject_id, relation.predicate, relation.object_id, reason="expired")
         return len(expired)
 
-    def observe(self, observation: VisualObservation, *, session_id: str = "vision") -> list[CognitiveEvent]:
+    def observe(self, observation: VisualObservation, *, session_id: str = "vision",
+                track_evidence: list[dict[str, Any]] | None = None) -> list[CognitiveEvent]:
         graph = self._graph()
         people = self.persons()
         tracks = dict(graph.get("tracks") or {})
@@ -327,7 +328,18 @@ class ContinuumService:
         scene_person_ids: set[str] = set()
         related: list[str] = []
         relation_events: list[CognitiveEvent] = []
-        for index, evidence in enumerate(observation.persons):
+        # Track history may contain several regions for one current scene person.
+        for index, evidence in enumerate(observation.persons if track_evidence is None else track_evidence):
+            if evidence.get("binding_status") == "temporal_identity_bridge":
+                person_id = evidence.get("person_id")
+                if person_id in people and people[person_id].known:
+                    # Scene continuity only: do not renew recognition, create tracks,
+                    # mutate the canonical registry or emit identity memory events.
+                    if people[person_id].current_presence:
+                        current.add(person_id)
+                    related.append(people[person_id].entity_id)
+                    scene_person_ids.add(people[person_id].entity_id)
+                continue
             if evidence.get("binding_status") == "anonymous_visual":
                 scene_person_ids.add(str(evidence.get("scene_person_id") or
                                          f"scene_person:{observation.timestamp}:{index}"))

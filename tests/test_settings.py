@@ -73,3 +73,12 @@ def test_resource_coordinator_defaults_and_bounds(monkeypatch) -> None:
     assert configured.resource_coordinator_enabled is True
     assert configured.resource_history_limit == 500
     assert configured.gpu_query_timeout_seconds == .1
+
+
+@pytest.mark.parametrize("value, expected", [(None, 20), ("16", 16), ("999", 20), ("-1", 0)])
+def test_temporal_identity_bridge_window_is_short_and_bounded(monkeypatch, value, expected):
+    if value is None:
+        monkeypatch.delenv("AVA_PERCEPTION_IDENTITY_BRIDGE_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv("AVA_PERCEPTION_IDENTITY_BRIDGE_SECONDS", value)
+    assert Settings().perception_identity_bridge_seconds == expected

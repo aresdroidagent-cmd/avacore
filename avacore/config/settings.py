@@ -402,6 +402,8 @@ class Settings:
         self.vision_poll_interval = bounded_float("AVA_VISION_POLL_INTERVAL", 10.0, 1.0, 3600.0)
         self.vision_event_cooldown = bounded_float("AVA_VISION_EVENT_COOLDOWN", 10.0, 0.0, 3600.0)
         self.perception_freshness_seconds = bounded_float("AVA_PERCEPTION_FRESHNESS_SECONDS", 3.0, 0.0, 300.0)
+        self.perception_handover_max_age_seconds = bounded_float("AVA_PERCEPTION_HANDOVER_MAX_AGE_SECONDS", 3.0, 0.0, 10.0)
+        self.perception_identity_bridge_seconds = bounded_float("AVA_PERCEPTION_IDENTITY_BRIDGE_SECONDS", 20.0, 0.0, 20.0)
         self.perception_track_iou_threshold = bounded_float("AVA_PERCEPTION_TRACK_IOU_THRESHOLD", 0.25, 0.0, 1.0)
         self.person_recognition_enabled = os.environ.get(
             "AVA_PERSON_RECOGNITION_ENABLED", "1" if self.identity_enabled else "0"
