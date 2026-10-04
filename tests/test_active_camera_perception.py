@@ -257,7 +257,7 @@ def test_man_wording_binds_single_fresh_local_identity(tmp_path):
     assert result.identity_binding_reason == "single_fresh_identity_action_bound"
 
 
-def test_pronoun_sensitive_composition_uses_conservative_two_part_form(tmp_path):
+def test_pronoun_sensitive_composition_reuses_single_canonical_name(tmp_path):
     service = CameraPerceptionService(configuration(tmp_path), continuum(tmp_path),
         capture=lambda **_: frame(tmp_path), detector=lambda _: [[10, 10, 100, 200]],
         recognizer=lambda **_: SimpleNamespace(identity="roger", confidence=.946,
@@ -269,10 +269,10 @@ def test_pronoun_sensitive_composition_uses_conservative_two_part_form(tmp_path)
             "während sie neben dem Sofa sitzt."))
     result = service.request(reason="see_command", force=True, include_scene=True,
                              scene_language="de")
-    assert result.scene_description.startswith("Roger ist sichtbar. Die Person hält")
-    assert "Roger hält" not in result.scene_description
+    assert result.scene_description.startswith("Roger hält")
+    assert "die person" not in result.scene_description.casefold()
     assert "während sie" not in result.scene_description
-    assert "während die Person" in result.scene_description
+    assert "während Roger" in result.scene_description
     assert result.identity_binding_reason == "single_fresh_identity_pronoun_safe"
     assert {"phone", "sofa"} <= set(result.objects)
     assert any(x["subject_id"] == "person:roger" and x["predicate"] == "HOLDING"
@@ -983,3 +983,40 @@ def test_bottle_cup_glass_uncertainty_is_preserved():
     assert details[0]["uncertain"] is True
     assert details[0]["candidate_labels"] == ["bottle", "coffee_cup", "glass"]
     assert [(r["subject_id"], r["predicate"], r["object_id"]) for r in relations] == [("drink_container", "ON", "table")]
+
+
+@pytest.mark.parametrize("description, expected", [
+    ("Die Person hält eine Flasche mit seiner Hand, während die Person neben der Couch sitzt.",
+     "Roger hält eine Flasche in der Hand, während Roger neben der Couch sitzt."),
+    ("Ein Mann hält eine Flasche. Die Person sitzt neben der Couch.",
+     "Roger hält eine Flasche. Roger sitzt neben der Couch."),
+    ("Eine Person hält ihre Flasche, während sie neben dem Sofa sitzt.",
+     "Roger hält Rogers Flasche, während Roger neben dem Sofa sitzt."),
+    ("Auf dem Sofa sitzt ein Mann.", "Auf dem Sofa sitzt Roger."),
+])
+def test_german_single_person_final_description_uses_name(tmp_path, description, expected):
+    service = perception(tmp_path, [[10, 10, 100, 200]], [("roger", .95)],
+                         descriptions=["a man holding a bottle next to couch"])
+    service.translator = lambda _: description
+    result = service.request(reason="see_command", force=True, include_scene=True, scene_language="de")
+    assert (result.scene_person_count, result.canonical_person_count, result.current_scene_unknown_count) == (1, 1, 0)
+    assert result.final_description == expected
+    assert result.description_de == description
+    assert not any(reference in result.final_description.casefold()
+                   for reference in ("die person", "eine person", "der mann", "ein mann"))
+    assert "gender" not in result.persons[0]
+    assert "gender" not in vars(service.continuum.persons()["roger"])
+    assert (result.vision_model_calls, result.translation_model_calls, result.reasoning_model_calls) == (1, 1, 0)
+
+
+def test_german_true_second_person_is_not_collapsed(tmp_path):
+    service = perception(tmp_path, [[10, 10, 100, 200], [300, 10, 100, 200]],
+                         [("roger", .95), ("unknown", .4)],
+                         descriptions=["a man and another person are visible"])
+    service.translator = lambda _: "Ein Mann und eine weitere Person sind sichtbar."
+    result = service.request(reason="see_command", force=True, include_scene=True, scene_language="de")
+    assert (result.scene_person_count, result.canonical_person_count, result.current_scene_unknown_count) == (2, 1, 1)
+    assert result.final_description == "Ein Mann und eine weitere Person sind sichtbar."
+    assert result.persons[0]["person_entity_id"] == "person:roger"
+    assert result.persons[1]["person_entity_id"] is None
+    assert (result.vision_model_calls, result.translation_model_calls, result.reasoning_model_calls) == (1, 1, 0)
