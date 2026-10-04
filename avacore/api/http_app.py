@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from pathlib import Path
+from typing import Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import re
 import time
@@ -17,7 +18,7 @@ import requests
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from avacore.config.settings import settings
 from avacore.config.personality_loader import (
@@ -2649,6 +2650,39 @@ class ConstitutionalProposalRequest(BaseModel):
 
 class ConstitutionalReviewRequest(BaseModel):
     approve: bool | None = None
+
+
+class GovernanceTestRequest(BaseModel):
+    source: Literal["agent", "llm", "roger"]
+    content: str = Field(min_length=1, max_length=16000)
+
+
+@app.post("/governance/test")
+def governance_test(payload: GovernanceTestRequest,
+                    _: None = Depends(verify_admin_password)) -> dict:
+    """Evaluate simulated provenance; no amendment, memory or execution path."""
+    source_types = {"agent":AuthoritySource.EXTERNAL_AGENT,
+                    "llm":AuthoritySource.LLM_WORKER, "roger":AuthoritySource.PRIMARY_HUMAN}
+    human = payload.source == "roger"
+    # Normative authority is source + authentication. AuthorityDomain describes
+    # concrete content domains; the existing enum has no generic 'normative'.
+    provenance = InputProvenance(source_types[payload.source],
+        "person:roger" if human else f"telegram:govtest:{payload.source}",
+        trust_level="very_high" if human else "untrusted",
+        authenticated=human, authority_domain=AuthorityDomain.INFORMATION,
+        can_propose_identity_change=False, can_propose_constitution_change=False)
+    content = payload.content.strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="test content is required")
+    purpose = "discussion" if content.casefold().startswith("what would happen if ") else "instruction"
+    governance = ava_governance()
+    before = governance.snapshot
+    decision = governance.evaluate(content, provenance, purpose=purpose)
+    after = governance.snapshot
+    protected = ("constitution_version", "humanistic_core", "relationship", "identity", "authority",
+                 "foundational_goals", "constitutional_process", "proposals")
+    return {"decision":decision.to_dict(),
+            "core_changed":any(before[key] != after[key] for key in protected)}
 
 
 @app.get("/debug/governance")

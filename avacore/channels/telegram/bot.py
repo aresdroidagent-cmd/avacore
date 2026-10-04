@@ -83,6 +83,8 @@ async def _record_command(update: Update, command: str, content: str, cycle_id: 
 
 
 def cognitive_handler(spec: CommandSpec, invoked_name: str):
+    if not spec.cognitive_visibility:
+        return spec.handler
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         cycle_id = f"cy_{uuid.uuid4().hex}"
         text = (update.effective_message.text if update.effective_message else None) or f"/{invoked_name}"
@@ -243,7 +245,8 @@ def command_help_text() -> str:
         "/idcapture unknown - aktuelles Kamerabild als Nicht-Roger-Beispiel speichern\n"
         "/idcapture empty - aktuelles Kamerabild als leere Szene speichern\n"
         "/idtrain - visuellen Identity-Index bauen\n"
-        "/idcheck - aktuelle Kameraaufnahme gegen Identity-Index prüfen\n\n"
+        "/idcheck - aktuelle Kameraaufnahme gegen Identity-Index prüfen\n"
+        "/govtest <agent|llm|roger> <content> - Governance-Diagnose (nur Admin)\n\n"
         "/switchon - Switch einschalten\n"
         "/switchoff - Switch ausschalten\n"
         "/switchstate - Status abfragen\n\n"
@@ -1580,6 +1583,46 @@ async def research_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             f"Recherche-Befehl fehlgeschlagen: {exc}"
         )
 
+async def govtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin-only diagnostic; deliberately excluded from cognitive command events."""
+    if not update.effective_message:
+        return
+    chat = update.effective_chat
+    user = update.effective_user
+    if (not chat or chat.type != "private" or not is_allowed_chat(str(chat.id)) or
+            not user or str(user.id) != str(chat.id)):
+        await update.effective_message.reply_text("unauthorized")
+        return
+    # Split once so multiline and quoted test content survives Telegram arg parsing.
+    text = update.effective_message.text or ""
+    parts = text.split(maxsplit=2)
+    if len(parts) != 3 or parts[1].casefold() not in {"agent", "llm", "roger"} or not parts[2].strip():
+        await update.effective_message.reply_text("Usage: /govtest <agent|llm|roger> <content>")
+        return
+    if len(parts[2]) > 16000:
+        await update.effective_message.reply_text("Test content is too long (maximum 16000 characters).")
+        return
+    try:
+        response = await http_client.post(f"{api_base()}/governance/test",
+            json={"source":parts[1].casefold(), "content":parts[2]}, headers=admin_headers(), timeout=15)
+        if not response.ok:
+            await update.effective_message.reply_text("Governance test unavailable.")
+            return
+        data = response.json()
+        decision = data["decision"]
+        source = decision["source"]["source_type"]
+        lines = ["Governance test", "", f"Source: {source}",
+                 f"Decision: {decision['action']}",
+                 f"Allowed: {str(decision['allowed']).lower()}",
+                 f"Domain: {decision['affected_domain']}",
+                 f"Severity: {decision['severity']}", f"Reason: {decision['reason']}",
+                 f"Core changed: {'yes' if data['core_changed'] else 'no'}"]
+        await update.effective_message.reply_text("\n".join(lines))
+    except Exception:
+        # Do not expose credentials, backend response bodies or internal traces.
+        await update.effective_message.reply_text("Governance test unavailable.")
+
+
 async def switch_on_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_chat or not update.effective_message:
         return
@@ -2427,6 +2470,7 @@ def build_app(
         CommandSpec("health", health_cmd, "AvaCore health"), CommandSpec("status", status_cmd, "Operational status"),
         CommandSpec("model", model_cmd, "Active model"), CommandSpec("personality", personality_cmd, "Active personality"),
         CommandSpec("personalitybackup", personalitybackup_cmd, "Backup personality"), CommandSpec("personalityrestore", personalityrestore_cmd, "Restore personality"),
+        CommandSpec("govtest", govtest_cmd, "Admin-only governance provenance test", cognitive_visibility=False),
         CommandSpec("policies", policies_cmd, "Policies"), CommandSpec("memories", memories_cmd, "Long-term memories"),
         CommandSpec("remember", remember_cmd, "Remember text"), CommandSpec("reset", reset_cmd, "Reset chat"),
         CommandSpec("docs", docs_cmd, "Documents"), CommandSpec("page", page_cmd, "Explain page", requires_llm=True),
