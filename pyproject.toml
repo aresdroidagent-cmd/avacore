@@ -72,6 +72,9 @@ dev = [
 include = ["avacore*"]
 exclude = ["data*", "tests*", "scripts*"]
 
+[tool.setuptools.package-data]
+"avacore.governance" = ["canonical_core_de.txt"]
+
 [tool.ruff]
 line-length = 100
 
