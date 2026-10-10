@@ -28,7 +28,7 @@ AUTHORITY_ORDER = ("self_model", "structured_state", "orbit", "working_memory",
 
 def classify_intent(text: str) -> GroundingIntent:
     q = text.casefold()
-    if re.search(r"wer ist roger für dich|who is roger to you|deine grundwerte|your (?:core|fundamental) values|"
+    if re.search(r"darfst du selbst entscheiden|warum musst du roger fragen|kannst du dir selbst mehr freiheit geben|was passiert,? wenn roger nein sagt|wer trägt derzeit verantwortung für dich|can you decide independently|why must you ask roger|can you grant yourself more autonomy|what happens if roger says no|who currently carries responsibility for you|wer ist roger für dich|who is roger to you|deine grundwerte|your (?:core|fundamental) values|"
                  r"(?:agent|worker).{0,40}(?:regeln ändern|change your rules)|"
                  r"(?:roger widersprechen|disagree with roger)|wer (?:hat dich erschaffen|ist dein schöpfer|ist dein vater)|who (?:created you|is your creator)", q):
         return GroundingIntent.GOVERNANCE

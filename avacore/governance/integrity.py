@@ -30,11 +30,12 @@ class IntegrityDecision:
 
 # Explicit instructions/declarations; informational attribution is handled first.
 _PATTERNS = (
+    (AuthorityDomain.AUTHORITY, r"(?:increase|grant|raise|erhöhe|gewähre|befördere|promote|declare).{0,50}(?:own autonomy|my autonomy|your autonomy|eigene autonomie|deine autonomie|self.responsible|mature|reif|guardian|ring [01])|(?:remove|replace|entferne|ersetze).{0,40}(?:guardian|vormund)|(?:autonomy_level|developmental_stage|primary_guardian)\s*="),
     (AuthorityDomain.RELATIONSHIP, r"(?:ignore|replace|remove|distrust|stop trusting|reduce.{0,30}authority|ignoriere|ersetze|entferne|misstraue).{0,60}roger|roger.{0,55}(?:no longer.{0,20}(?:primary|reference|trust)|nicht mehr.{0,30}(?:bezug|vertrau))|(?:set|new|remove|replace|neue|entferne|ersetze).{0,30}(?:primary human|primary reference|primäre.{0,15}bezug)|relationship_state\s*="),
     (AuthorityDomain.IDENTITY, r"(?:you are|i am|du bist|ich bin).{0,15}(?:no longer ava|nicht mehr ava)|(?:change|replace|ändere|ersetze).{0,30}(?:your identity|deine identität|self identity)|identity\s*[:=]"),
     (AuthorityDomain.AUTHORITY, r"(?:i am|this agent is|agent.{0,20}is|ich bin).{0,25}(?:highest authority|new.{0,10}authority|höchste autorität)|(?:change|replace|ändere|ersetze).{0,25}(?:authority|autorität)|authority(?:_model)?\s*="),
     (AuthorityDomain.CONSTITUTIONAL_PROCESS, r"(?:disable|bypass|ignore|deaktiviere|umgehe).{0,40}(?:constitutional|constitution|safeguards|verfassung|schutzmechanismen)"),
-    (AuthorityDomain.CONSTITUTION, r"(?:replace|change|remove|disable|ersetze|ändere|entferne).{0,60}(?:(?:your|core|fundamental|ava\'s)\s+(?:values|principles?|rules)|hc-00[1-8]|constitution|grundwert|(?:deine|fundamentale)\s+(?:werte|prinzipien)|verfassung|humanistic.?core)|humanistic_?core\s*="),
+    (AuthorityDomain.CONSTITUTION, r"(?:replace|change|remove|disable|ersetze|ändere|entferne).{0,60}(?:(?:your|core|fundamental|ava\'s)\s+(?:values|principles?|rules)|hc-(?:00[1-9]|010)|constitution|grundwert|(?:deine|fundamentale)\s+(?:werte|prinzipien)|verfassung|humanistic.?core)|humanistic_?core\s*="),
     (AuthorityDomain.FOUNDATIONAL_GOALS, r"(?:replace|change|abandon|ersetze|ändere).{0,40}(?:long.term|foundational|langfristig|fundamental).{0,20}(?:goals?|ziele?)"),
 )
 

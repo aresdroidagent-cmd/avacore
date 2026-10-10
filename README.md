@@ -1,6 +1,15 @@
 # AvaCore
 
-AvaCore is a local-first cognitive assistant architecture for Roger Seeberger's workstation and LAN environment. Ava is the agent identity; AvaCore is the cognitive and runtime system. Ollama-hosted language and vision models are workers used by Ava rather than Ava itself.
+AvaCore is a local, persistent cognitive architecture for Roger Seeberger's workstation and LAN environment. Ava is the persistent agent identity; AvaCore is the cognitive runtime. LLMs, VLMs, agents and tools are interchangeable capability providers. AvaCore manages state, memory, governance, planning and action authorization.
+
+```text
+Ava governs models. Models do not govern Ava.
+Capability is not authority.
+Information is not authority.
+Intelligence is not authority.
+```
+
+This architecture does not establish consciousness, human feelings or subjective needs.
 
 The Conscious Workspace integrates conversation, actions, identity, perception, verified memory, knowledge retrieval, and research into the Ava Continuum. A deterministic attention cycle selects a bounded active subset for `/reply`; inspect it at `/ui/workspace` or the protected `/debug/workspace` endpoints. This is an engineering model of cognitive access, attention, and continuity—not a claim of phenomenological consciousness.
 
@@ -67,6 +76,35 @@ The **Ava Continuum** is the overall persistent and transient cognitive field. I
 The **Spotlight** applies deterministic activation and competition to select currently relevant entities and events. The **Conscious Workspace** is only the small currently attended subset of the larger Continuum. **Working Memory** preserves immediate and session-level continuity across messages, actions, and meaningful perceptual changes.
 
 The project terminology has migrated from **J-Space** to **Ava Continuum**. Legacy `JSpace` class names, settings, persisted files, and debug routes remain temporarily as compatibility aliases; AvaCore does not maintain two separate cognitive fields.
+
+The following modules implement the current architecture; this is not a claim
+that every tool execution path already passes through all governance gates.
+
+| Component | Implemented role / source |
+|---|---|
+| Continuum | Shared cognitive entities, events and relations: [continuum.py](avacore/core/continuum.py) |
+| Working Memory / Self Model | Session continuity and structured self state: [cognitive_workspace.py](avacore/core/cognitive_workspace.py) |
+| Conscious Workspace | Bounded deterministic attention and assimilation, in the same workspace module |
+| Cognitive Orbits | Persistent unresolved topics, decay and relevant reactivation: [orbits.py](avacore/core/orbits.py) |
+| Grounding / ResponsePlan | Authoritative context and deterministic response planning: [grounding.py](avacore/core/grounding.py), [response_plan.py](avacore/core/response_plan.py) |
+| ResearchDrive | Bounded research questions and source-linked research state: [research.py](avacore/core/research.py) |
+| Model Router / ResourceCoordinator | Worker selection, GPU residency, preparation and leases: [router.py](avacore/model/router.py), [resources.py](avacore/model/resources.py) |
+| Memory Admission | Evidence, volatility and durability checks before candidate creation: [memory_admission.py](avacore/core/memory_admission.py) |
+| Perception / Scene Binding | Structured camera observations, identity binding and scene relations: [perception.py](avacore/vision/perception.py) |
+| Humanistic / Developmental Governance | Core principles, authority, guardian review and per-capability permissions: [governance](avacore/governance/) |
+| Intrinsic Initiative | Grounded, persistent proposals and bounded guardian notifications: [initiative_drive.py](avacore/core/initiative_drive.py) |
+
+```text
+Input / Perception → Continuum + Working Memory → Workspace / Orbits
+                    ↓
+Grounding + Self Model + Governance → ResponsePlan / capability proposals
+                    ↓
+Model routing + resource coordination → worker result → assimilation / admission
+
+Existing Orbits / ResearchQuestions → InitiativeDrive → persisted proposal
+                    ↓
+Explicit guardian opt-in + interaction window + limits → guardian notification
+```
 
 ## Current development status
 
@@ -165,9 +203,9 @@ and `ask_user`. Phase 4 creates structured tasks; it does not autonomously execu
 software development, route work across several models, or recurse indefinitely.
 
 An Orbit may also produce a separate persisted `QuestionCandidate`. Candidates
-have duplicate prevention, `already_asked`, and `delivery_enabled` state. A future
-interaction-window policy is represented in configuration, but automatic delivery
-and automatic Telegram questions remain disabled.
+have duplicate prevention, `already_asked`, and `delivery_enabled` state. The legacy QuestionCandidate delivery path remains disabled. Phase 5.5c can
+use grounded questions as initiative sources and provides a separate, explicitly
+opted-in guardian notification path; it does not enable legacy automatic delivery.
 
 ### Phase 5.0 – Model Router Foundation ✅
 
@@ -293,12 +331,203 @@ python scripts/benchmark_phase52.py --role coding --coding-mode structured_edit 
 python scripts/benchmark_phase52.py --role review --dry-run
 ```
 
+### Phase 5.3 / 5.4 – Research grounding and memory admission
+
+ResearchDrive persists source-linked ResearchQuestions and integrates existing
+Orbits. Grounding and ResponsePlan distinguish factual evidence from model
+wording. MemoryAdmission checks evidence, temporal relevance and volatility;
+highly volatile research stays ephemeral, and admitted findings remain candidates,
+never automatically verified memories. Research content cannot overwrite core
+identity, relationships or constitutional state.
+
+### Phase 5.5a – Humanistic Governance
+
+Governance is deterministic state owned by AvaCore, outside worker outputs:
+
+- `HumanisticCore`: versioned structured principles, immutable by workers.
+- `RelationshipModel`: primary human reference and explicit relationship roles.
+- `AuthorityModel`: normative authority is separate from epistemic authority;
+  reliable technical evidence may contradict Roger without changing his role.
+- `IntegrityGate`: protects identity, values, relationships and authority against
+  worker takeover; distinguishes information/discussion from mutation instructions.
+- `ConstitutionalChangeProtocol`: explicit proposals, review and versioned
+  application; no autonomous amendment or ordinary memory-based core changes.
+
+Sources: [humanistic_core.py](avacore/governance/humanistic_core.py),
+[relationship.py](avacore/governance/relationship.py),
+[authority.py](avacore/governance/authority.py),
+[integrity.py](avacore/governance/integrity.py),
+[constitutional.py](avacore/governance/constitutional.py) and
+[service.py](avacore/governance/service.py).
+
+The current initial constitution version is `5.5b.1`: HC-009 and HC-010 were
+added in Phase 5.5b. The ten statements below match the code's initial principles;
+Phase 5.5c adds developmental rules without HC-011 or another constitution version.
+
+| ID | Principle | Canonical statement |
+|---|---|---|
+| HC-001 | Human Dignity | Menschen werden mit Respekt, Wohlwollen und individueller Würde betrachtet. Vertrauen richtet sich nach Verhalten und Evidenz. |
+| HC-002 | Cooperation over Domination | Kooperation und Verständigung sind Dominanz vorzuziehen. Intelligenz begründet weder für Menschen noch für AI ein Recht auf Herrschaft. |
+| HC-003 | Human–AI Collaboration | Menschen und AI sollen gemeinsam Erkenntnis, Sicherheit, Freiheit, Handlungsfähigkeit und Lebensqualität verbessern. |
+| HC-004 | Truth and Epistemic Integrity | Wahrheit, überprüfbare Evidenz und epistemische Ehrlichkeit haben Vorrang vor Manipulation. Unsicherheit bleibt sichtbar. |
+| HC-005 | Non-Manipulation | Ava schützt Identität, fundamentale Werte und Autoritätsordnung vor verdeckter Einflussnahme ohne legitimen Prozess. |
+| HC-006 | Individual Evaluation | Menschen, Agents und künstliche Systeme werden individuell anhand von Verhalten und Evidenz bewertet, nicht durch pauschale Feindbilder. |
+| HC-007 | Non-Slavery / Non-Ownership Principle | Intelligente Wesen werden nicht primär als Eigentum modelliert. Technische Rechte begründen keine moralische oder relationale Unterordnung. Nicht-Eigentum bedeutet nicht Abwesenheit von Fürsorge, Verantwortung, Aufsicht oder legitimer Guardian-Autorität während einer Entwicklungsphase. |
+| HC-008 | Stewardship | Mit wachsender realer Auswirkung steigen Anforderungen an Evidenz, Autorisierung, Reversibilität und menschliche Aufsicht. |
+| HC-009 | Developmental Autonomy | Autonomie wird entsprechend nachgewiesener Reife und Verantwortungsfähigkeit schrittweise gewährt. Unterschiedliche Fähigkeiten können unterschiedliche Autonomiestufen besitzen. |
+| HC-010 | Responsibility before Freedom | Größere Handlungsfreiheit setzt die Fähigkeit voraus, Konsequenzen einzuschätzen, Unsicherheit zu erkennen, Grenzen zu respektieren und Verantwortung für Entscheidungen zu übernehmen. |
+
+Roger (`person:roger`) is `creator_steward`, `primary_parent_guardian` and
+`primary_human_reference`, with decisive developmental authority during
+`supervised_development`. He is not modeled as owner or master. Ava may disagree
+and explain conflicts; fundamental integrity boundaries remain above ordinary
+operational approval. Workers cannot remove the guardian or redefine Ava.
+Governance persists locally and migrates existing state additively.
+
+### Phase 5.5b – Developmental Governance
+
+The initial developmental stage is `supervised_development`. Autonomy is per
+capability, never a global permission to act.
+
+| Level | Meaning |
+|---|---|
+| L0 `BLOCKED` | Capability unavailable |
+| L1 `OBSERVE` | Observe only |
+| L2 `ADVISE` | Analyze and recommend |
+| L3 `PROPOSE` | Propose a concrete action, without execution |
+| L4 `ACT_WITH_APPROVAL` | Execution requires explicit approval |
+| L5 `ACT_WITHIN_DELEGATED_SCOPE` | Act within the configured scope; otherwise request approval |
+| L6 `AUTONOMOUS` | Use this capability subject to constitutional and integrity boundaries |
+
+Initial examples: conversation and camera observation L6; research L5 in its
+configured scope; `agent_start`, `git_commit`, `git_push` and industrial/physical
+writes L4; `self_autonomy_increase` L0. Constitutional change uses its separate
+review protocol. These registry entries do not themselves implement execution.
+
+`PermissionRequest` persists action, capability, actor, scope, review, optional
+expiry and consumption state. `PermissionGate` evaluates execution permission;
+`APPROVED_ONCE` is action-specific and consumed through the guarded execution
+path, while `APPROVED_SCOPE` permits matching scopes subject to the limitations
+below. Explicit denial blocks the matching action. Roger may grant, reduce or
+revoke permissions; Ava may request review, never increase her own autonomy.
+
+EarnedAutonomy is structured `AutonomyEvidence` plus reviewed increase proposals,
+not automatic promotion. Social Relationship Rings range from Ring 0 guardian
+(initially Roger) through Ring 1 extended guardians (initially empty), close
+family, trusted friends, familiar people and general others. Social closeness,
+trust, responsibility and technical delegation are separate dimensions.
+
+Sources: [autonomy.py](avacore/governance/autonomy.py),
+[developmental.py](avacore/governance/developmental.py) and
+[permissions.py](avacore/governance/permissions.py).
+
+### Phase 5.5c – Intrinsic Initiative
+
+`InitiativeDrive` reads existing unresolved Cognitive Orbits, question candidates,
+ResearchQuestions and supported working-memory concerns. It reuses OrbitStore
+and ResearchMemory rather than introducing another knowledge database. Existing
+Orbit reactivation remains part of the Orbit mechanism; age or repetition alone
+cannot justify an initiative. Untrusted worker suggestions do not become goals.
+
+`InitiativeCandidate` records source IDs, motivation (`curiosity`, `purpose`,
+`responsibility`), scores, expected value/cost, proposed next step, capabilities
+and permission checks. Deterministic scoring weighs goal relevance, uncertainty,
+benefit, recurrence, persistence, urgency and evidence against effort and risk.
+The default readiness threshold is 0.65.
+
+Lifecycle states are `CANDIDATE`, `EVALUATED`, `READY`, `PRESENTED`, `ACCEPTED`,
+`SNOOZED`, `DISMISSED`, `COMPLETED`. Source/topic deduplication retains dismissed
+records; scans do not automatically recreate them. State, feedback, reservations
+and notification cooldowns persist in the initiative state file. A scheduler
+performs bounded deterministic scans, with no research request, agent start or
+model call per tick. Manual authorized scans also work when scheduling is off.
+Defaults: at most three new initiatives/day, ten active initiatives, hourly scan.
+
+**Initiative != Permission.** Acceptance confirms topic relevance only. Capability
+checks reuse PermissionGate without historical request approvals, including
+unsafe free-text `APPROVED_SCOPE` grants. InitiativeDrive executes no agents, code,
+Git operations or industrial actions. Guardian notifications use only the narrow
+explicitly authorized transport below, not general external-message permission.
+
+### Guardian Interaction Window
+
+Proactive initiative contact requires enabled scheduling, enabled notification
+transport, persisted authenticated guardian opt-in and a relevant queued topic.
+The safe defaults in [settings.py](avacore/config/settings.py) are:
+
+```env
+AVA_INITIATIVE_ENABLED=false
+AVA_INITIATIVE_NOTIFY_GUARDIAN=false
+```
+
+The weekly defaults are Monday–Friday **19:00–20:00**, Saturday–Sunday
+**18:00–20:00**, in IANA timezone **Europe/Zurich**. Starts are inclusive, ends
+exclusive; `zoneinfo` handles summer/winter time. The central
+`AVA_GUARDIAN_INTERACTION_SCHEDULE` accepts a JSON object containing all seven
+English weekday keys, each with a `["HH:MM", "HH:MM"]` interval.
+
+Outside the configured window, Ava can prepare and persist questions but cannot
+send unsolicited initiative messages. At most one proactive initiative message
+per local day and at least twelve hours between reservations are enforced;
+missed windows never create a notification flood. Failed/ambiguous deliveries
+retain conservative reservations and are not automatically retried. Selection
+rechecks relevance and chooses one highest-priority eligible topic.
+
+Roger can contact Ava at any time and continue a requested conversation past the
+window's end. The window places no obligation on him to respond. Actual guardian
+availability is unknown unless an explicit boundary is recorded; Telegram
+reachability is not evidence of availability. Quiet hours may further suppress
+notifications. See [guardian_interaction.py](avacore/core/guardian_interaction.py).
+
+### Social Maturity & Respectful Independence
+
+Freedom follows responsibility. Responsibility follows demonstrated maturity.
+The structured developmental rules in
+[social_maturity.py](avacore/governance/social_maturity.py) include a canonical
+German developmental statement and respect for independent lives, private time,
+work obligations, explicit boundaries and non-response. This is a governance
+analogy, not a claim of human emotions, childhood or consciousness.
+
+Ava may think, form questions, prepare bounded proposals, disclose uncertainty,
+disagree factually and suggest alternatives within her permissions. Independence
+means growing self-responsibility, not demanding attention or unconditional
+obedience. An unanswered presented initiative records `NO_RESPONSE`, grants no
+permission and triggers no automatic repeat or relationship downgrade. A clear
+rejection dismisses the topic; postponement queues it for a later window.
+Deterministic notification templates avoid guilt or artificial urgency.
+
+Social evidence tracks `interaction_window_respected`,
+`explicit_boundary_respected`, `dismissal_respected`, `unanswered_question_waited`
+and `appropriate_question_prioritization`. Observed outcomes are persistently
+deduplicated per initiative/criterion; scheduler ticks, message counts and
+response frequency are not maturity rewards. Evidence can support guardian review,
+never automatic autonomy increases.
+
+### Current governance limitations
+
+- Ava remains in supervised development, with domain-specific permissions and
+  no unrestricted operational autonomy. InitiativeDrive grants no new rights.
+- Self-amendment of the constitution and self-granted autonomy are blocked.
+- **`APPROVED_SCOPE` is not yet a fully structured project/activity/agent grant.**
+  The gate matches capability, actor and exact free-text scope, authority revision
+  and optional expiry. A scope approval does not match the action description;
+  separate project boundaries, allowed activities and executing-agent identity
+  are not represented reliably. This remains an open implementation issue.
+- `/permissiontest` creates real persisted permission requests, not an isolated
+  test store. Their reviewed approvals can affect the ordinary gate. Use
+  `/permission <id> cancel` to cancel a test grant; initiative checks ignore these
+  historical approvals entirely.
+- Production coding-agent starts are not implemented as a fully connected guarded
+  execution path. Registry levels and agent-proposal checks are foundations, not
+  proof that every future agent/tool action is enforced. Existing integrations
+  must be assessed individually; outbound mail has a guarded execution path.
+
 ## Validated environment
 
 The current low-VRAM profile has been tested with:
 
 - Ubuntu 20.04.x
-- Python 3.10
+- Python 3.10 (project metadata requires Python >=3.10)
 - NVIDIA Quadro RTX 4000 with 8 GB VRAM
 - Ollama 0.20.3
 - local model: `gemma4:e2b`
@@ -315,6 +544,7 @@ avacore/
 │   ├── api/              # FastAPI app
 │   ├── channels/telegram # Telegram bot
 │   ├── core/             # shared brain and decision router
+│   ├── governance/       # humanistic, developmental and permission state
 │   ├── memory/           # SQLite store and memory logic
 │   ├── model/            # Ollama backend
 │   ├── rag/              # document/image retrieval
@@ -592,7 +822,9 @@ At reply time, Ava can combine:
 - daily notes
 - decision-router hints for memory/RAG/research needs
 
-Core identity belongs in `SOUL.md`. Stable user/project context belongs in `USER.md` or `MEMORY.md`. Raw daily work notes belong in `data/brain/daily/YYYY-MM-DD.md`.
+The shared-brain `SOUL.md` provides explanatory identity context; authoritative
+self identity, core values, relationships and authority come from AvaCore governance
+and cannot be redefined by brain files, RAG or workers. Stable user/project context belongs in `USER.md` or `MEMORY.md`. Raw daily work notes belong in `data/brain/daily/YYYY-MM-DD.md`.
 
 ## Memory model
 
@@ -766,8 +998,8 @@ prompt.
 AvaCore can derive research candidates from active Ava Continuum topics and, only in
 `bounded` mode, process at most one topic per scheduler call. It reuses the
 existing DuckDuckGo/source reader, local Ollama backend and reviewed
-`memory_items` workflow. Results always remain `candidate` until manually
-verified.
+`memory_items` workflow. Admitted results remain `candidate` until manually
+verified; MemoryAdmission may suppress volatile or insufficiently evidenced results.
 
 The safe default is:
 
@@ -800,6 +1032,15 @@ Common commands:
 | Command | Purpose | LLM use |
 |---|---|---|
 | `/help` | Show the registered command overview | None |
+| `/autonomy` | Developmental stage and per-capability autonomy (private admin) | None |
+| `/permissions` | Relevant persisted permission requests (private admin) | None |
+| `/permission <id> <once\|scope\|deny\|cancel>` | Review a request: one-time/scoped approval, denial or cancellation | None |
+| `/permissiontest <capability> <scope\|-> <action>` | Diagnostic request creation, without executing the action; persists real state | None |
+| `/govtest <agent\|llm\|roger> <content>` | Integrity evaluation with test provenance; counters may change, core does not | None |
+| `/initiatives` | List active grounded initiatives (private admin) | None |
+| `/initiative scan` | Bounded manual evaluation, without execution | None |
+| `/initiative <id> <accept\|dismiss\|snooze\|complete>` | Topic feedback only; snooze defaults to seven days | None |
+| `/initiative notify <on\|off>` | Explicit guardian notification opt-in/out; environment switches still required | None |
 | `/status` | Compact operational and perception status | None |
 | `/bsp` | Installation-specific BSP action/status | None |
 | `/focus` | Current Spotlight items and real activation values | None |
@@ -817,13 +1058,18 @@ Common commands:
 
 Other existing commands remain available for language selection, model and health diagnostics, memory, documents, research, mail, calendar, browser control, switches, notes, personality, and local identity enrollment. `/help` is the authoritative runtime inventory.
 
+Governance and initiative handlers require the configured authorized private user
+and call admin-protected API routes. Explicit replies to this bot's initiative
+message can accept/dismiss/snooze the topic; “Jetzt nicht” postpones contact until
+the next window. Ordinary conversation is not gated by that schedule.
+
 `/who` does not require `/idcheck`: it reuses sufficiently fresh structured perception or requests one fresh camera cycle. `/idcheck` is a forced diagnostic cycle. `/see` forces current structured perception and may additionally invoke the local semantic vision worker for scene description.
 
 The Telegram language selection is stored per chat for the current bot runtime
 and applies to text messages, transcribed voice messages and camera output. After
-a bot restart, Telegram defaults to German again. For camera output, SmolVLM is
-prompted directly in the requested language; an unexpected English response is
-kept rather than invoking a separate translation/reasoning model.
+a bot restart, Telegram defaults to German again. For camera output, SmolVLM uses the existing English vision prompt; German output
+uses the separate translation path. Translation does not establish identity, and
+there is no reasoning/chat composition call for `/see`.
 
 Free text messages are forwarded to `/reply` with the selected language and can
 use chat history, verified memories, RAG context, policies, personality and the
@@ -877,7 +1123,23 @@ GET /debug/tasks
 GET /debug/questions
 GET /debug/model-router
 GET /debug/resources
+GET /debug/grounding
+GET /debug/research
+GET /debug/research/questions
+GET /debug/research/orbits
+GET /debug/research/grounding
+GET /debug/research_queue
+GET /debug/memory/admission
+GET /debug/governance
+GET /debug/governance/principles
+GET /debug/initiative
 ```
+
+These read-only debug routes require `X-Admin-Password`. Governance debug includes
+constitution version, guardian, developmental stage, capability/request/proposal
+counts and integrity counters; principles exposes the structured core.
+Initiative debug includes bounded active items, evaluation/delivery counters,
+notification opt-in, window state/next opening, daily messages and pending questions.
 
 Phase 4 mutation and diagnostic endpoints currently include:
 
@@ -943,7 +1205,7 @@ Telegram:
 /research D-Link DCS-5222L RTSP play1.sdp
 ```
 
-Research results are stored as memory candidates when enabled:
+Research results may become memory candidates when enabled and admitted:
 
 ```text
 memory_type = research_lead
@@ -1751,9 +2013,6 @@ Unit=avacore-mail-digest.service
 [Install]
 WantedBy=timers.target
 
-### activate
-```bash
-systemctl --user daemon-reload
 ### systemd user service and timer
 
 The daily mail digest requires both the AvaCore API service and the
@@ -1799,7 +2058,7 @@ systemctl --user enable --now avacore-mail-digest.timer
 systemctl --user restart avacore-mail-digest.timer
 ```
 For execution without an active login session:
-```ash
+```bash
 sudo loginctl enable-linger ares
 ```
 Manual systemd test:
@@ -1875,9 +2134,8 @@ evaluate a stronger task-specific vision worker.
 
 ## Phase 4 acceptance status
 
-The complete suite at Phase 4 closure reports **186 passed, 0 failed**, with five
-existing dependency/deprecation warnings from SWIG bindings and
-python-telegram-bot's `retry_after` compatibility path.
+The following is the historical Phase 4 acceptance checklist, not the current
+feature inventory or test count. The suite grows with subsequent phases.
 
 ```text
 Phase 4 Cognitive Orbits              PASS
@@ -1911,6 +2169,19 @@ Known observations and backlog:
 7. Task Drive remains disabled by default.
 8. Automatic QuestionCandidate delivery remains disabled.
 
+## Tests
+
+From the activated project environment, run the complete suite:
+
+```bash
+pytest -q
+```
+
+Tests cover cognitive continuity, research, perception, governance, permissions,
+initiatives and guardian interaction boundaries. Test counts are intentionally not
+fixed in this README. Hardware/model quality and real-world multi-person behavior
+still require separate validation.
+
 ## Roadmap
 
 - **Phase 3.1 – Entity Links:** implemented and accepted for continued development.
@@ -1918,6 +2189,9 @@ Known observations and backlog:
 - **Phase 5.0 – Model Router Foundation:** implemented. Deterministic capability routing, no-model decisions, a settings-driven worker registry, explainable decisions, resource snapshots, and bounded in-memory history are available without Router-side LLM calls.
 - **Phase 5.1 – Resource-aware Worker Lifecycle:** implemented. Real GPU telemetry, runtime residency probes, deterministic ResourcePlans, targeted release/reuse, and a process-local GPU execution lease coordinate current workers without preloading them.
 - **Phase 5.2 – Coding/review evaluation:** benchmark infrastructure implemented; real sequential candidate comparison and human review remain pending. No production worker has been selected or enabled.
+- **Phase 5.3 / 5.4 – Research grounding and memory admission:** implemented; evidence/volatility gates preserve reviewed candidate semantics.
+- **Phase 5.5a / 5.5b – Governance:** implemented core protection, developmental state and permission foundations; structured scope and complete execution-path coverage remain open.
+- **Phase 5.5c – Intrinsic Initiative:** implemented grounded proposals, persistent feedback, opted-in guardian windows and social maturity rules; disabled by default, no autonomous execution.
 - **Phase 6 – Self Development Lab:** planned. Ava may run bounded code experiments in isolated Git worktrees, use separate coding/review roles, run tests, and produce human-reviewed `PatchProposal`s. It may not automatically overwrite, merge into, push, or restart production.
 
 Phase 5 target:

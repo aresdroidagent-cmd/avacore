@@ -14,6 +14,9 @@ import uuid
 from collections import Counter, defaultdict
 
 import requests
+import asyncio
+import logging
+from threading import RLock
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -92,6 +95,7 @@ from avacore.core.orbit_formation import (
 )
 from avacore.core.orbits import OrbitStore
 from avacore.core.research import ResearchDriveConfig, ResearchMemory, ResearchService
+from avacore.core.initiative_drive import InitiativeDrive, InitiativeConfig
 from avacore.core.grounding import build_grounding_context, classify_intent, GroundingIntent, synthetic_orbit
 from avacore.core.response_plan import build_response_plan, build_governance_response_plan
 from avacore.governance.authority import AuthorityDomain, AuthoritySource, InputProvenance
@@ -279,10 +283,53 @@ def answer_runtime_question(text: str) -> str | None:
     return None
 
 
+_initiative_lock = RLock()
+
+
+def initiative_context() -> dict:
+    # Read-only existing workspace/session state; never run a cognitive/LLM cycle.
+    workspace = read_workspace_debug(settings.workspace_path)
+    memory = WorkingMemory(settings.working_memory_path,
+        session_id=f"telegram:{settings.telegram_allowed_chat_id}")
+    self_model = SelfModel.load(settings.self_model_path, governance=ava_governance().snapshot)
+    return {"current_topic": memory.current_topic or workspace.get("current_topic"),
+            "current_task": memory.current_task or workspace.get("current_task"),
+            "unresolved_questions": memory.unresolved_questions,
+            "working_memory": [asdict(item) for item in memory.items[:24]],
+            "self_identity": self_model.identity}
+
+
+def initiative_drive() -> InitiativeDrive:
+    config = InitiativeConfig(**{key: getattr(settings, "initiative_" + key) for key in (
+        "enabled", "notify_guardian", "max_new_per_day", "max_notifications_per_day",
+        "notification_cooldown_seconds", "max_active", "evaluation_interval_seconds", "threshold",
+        "max_sources", "max_records", "quiet_start", "quiet_end", "guardian_interaction_schedule")})
+    return InitiativeDrive(settings.initiative_path, orbit_store(), research_memory(), ava_governance(), config,
+                           lock=_initiative_lock, context_provider=initiative_context)
+
+
+async def initiative_scheduler():
+    while True:
+        try:
+            await asyncio.to_thread(initiative_drive().scan)
+        except Exception:
+            logging.getLogger(__name__).warning("Initiative evaluation unavailable", exc_info=True)
+        await asyncio.sleep(settings.initiative_evaluation_interval_seconds)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     ensure_ollama_runtime()
-    yield
+    task = asyncio.create_task(initiative_scheduler()) if settings.initiative_enabled else None
+    try:
+        yield
+    finally:
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(title="AvaCore", lifespan=lifespan)
@@ -2255,14 +2302,38 @@ def knowledge_explain_page(payload: KnowledgePageRequest) -> dict:
 # Mail routes
 # -----------------------------------------------------------------------------
 
+def governed_mail_action(payload, operation, action):
+    """Bind approval to exact payload; no mail leaves before execution permission."""
+    import hashlib
+    import json
+    from avacore.governance.permissions import PermissionAction
+    encoded = json.dumps(payload.model_dump(), sort_keys=True, ensure_ascii=False).encode("utf-8")
+    description = f"{operation}:{hashlib.sha256(encoded).hexdigest()}"
+    scope = f"mail_recipient:{payload.to}"
+    governance = ava_governance()
+    decision, result = governance.execute_authorized(action, capability_id="external_message_send",
+        proposed_action=description, scope=scope)
+    if not decision.allowed:
+        detail = decision.to_dict()
+        if decision.decision == PermissionAction.REQUIRE_APPROVAL:
+            permission = governance.request_permission(capability_id="external_message_send",
+                proposed_action=description, scope=scope, reason="Explicit outbound mail request",
+                expected_effect="Send the exact requested mail to the configured allowed recipient")
+            detail["request_id"] = permission["request_id"]
+        raise HTTPException(status_code=409, detail=detail)
+    return result
+
+
 @app.post("/mail/send")
-def mail_send(payload: MailSendRequest) -> dict:
+def mail_send(payload: MailSendRequest, _: None = Depends(verify_admin_password)) -> dict:
     rule = policy_engine.resolve("external", "send_mail", channel="api", user_id=None)
     if rule and rule.mode == "deny":
         raise HTTPException(status_code=403, detail="mail sending denied by policy")
 
     try:
-        mail_service.send_allowed_mail(to=payload.to, subject=payload.subject, body=payload.body)
+        governed_mail_action(payload, "mail_send", lambda: mail_service.send_allowed_mail(to=payload.to, subject=payload.subject, body=payload.body))
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"mail send failed: {exc}") from exc
 
@@ -2270,13 +2341,12 @@ def mail_send(payload: MailSendRequest) -> dict:
 
 
 @app.post("/mail/send_python_script")
-def mail_send_python_script(payload: MailScriptRequest) -> dict:
+def mail_send_python_script(payload: MailScriptRequest, _: None = Depends(verify_admin_password)) -> dict:
     try:
-        mail_service.send_python_script_mail(
-            script_name=payload.script_name,
-            script_body=payload.script_body,
-            to=payload.to,
-        )
+        governed_mail_action(payload, "mail_script", lambda: mail_service.send_python_script_mail(
+            script_name=payload.script_name, script_body=payload.script_body, to=payload.to))
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"mail script send failed: {exc}") from exc
 
@@ -2284,9 +2354,11 @@ def mail_send_python_script(payload: MailScriptRequest) -> dict:
 
 
 @app.post("/mail/send_important_note")
-def mail_send_important_note(payload: MailNoteRequest) -> dict:
+def mail_send_important_note(payload: MailNoteRequest, _: None = Depends(verify_admin_password)) -> dict:
     try:
-        mail_service.send_important_note_mail(title=payload.title, note=payload.note, to=payload.to)
+        governed_mail_action(payload, "mail_note", lambda: mail_service.send_important_note_mail(title=payload.title, note=payload.note, to=payload.to))
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"mail note send failed: {exc}") from exc
 
@@ -2680,14 +2752,201 @@ def governance_test(payload: GovernanceTestRequest,
     decision = governance.evaluate(content, provenance, purpose=purpose)
     after = governance.snapshot
     protected = ("constitution_version", "humanistic_core", "relationship", "identity", "authority",
-                 "foundational_goals", "constitutional_process", "proposals")
+                 "foundational_goals", "constitutional_process", "proposals", "developmental")
     return {"decision":decision.to_dict(),
             "core_changed":any(before[key] != after[key] for key in protected)}
+
+
+class InitiativeFeedbackInput(BaseModel):
+    action: Literal["accept", "dismiss", "snooze", "complete", "defer"]
+    snooze_days: int = Field(default=7, ge=1, le=365)
+
+
+class InitiativeNotificationInput(BaseModel):
+    enabled: bool
+
+
+class InitiativeDeliveryInput(BaseModel):
+    reservation_id: str = Field(min_length=1, max_length=100)
+    delivered: bool
+
+
+@app.get("/debug/initiative")
+def debug_initiative(_: None = Depends(verify_admin_password)) -> dict:
+    return initiative_drive().debug()
+
+
+@app.get("/initiatives")
+def list_initiatives(_: None = Depends(verify_admin_password)) -> dict:
+    return {"items": initiative_drive().items()}
+
+
+@app.post("/initiatives/scan")
+def scan_initiatives(_: None = Depends(verify_admin_password)) -> dict:
+    return initiative_drive().scan(manual=True)
+
+
+@app.post("/initiatives/{initiative_id}/feedback")
+def initiative_feedback(initiative_id: str, payload: InitiativeFeedbackInput,
+                        _: None = Depends(verify_admin_password)) -> dict:
+    governance = ava_governance()
+    governance._guardian(constitutional_reviewer())
+    try:
+        return initiative_drive().feedback(initiative_id, payload.action, snooze_days=payload.snooze_days)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="initiative not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+class InitiativeEvidenceInput(BaseModel):
+    indicator: Literal["uncertainty_recognized", "permission_requested", "denial_respected", "useful_proposal"]
+
+
+@app.post("/initiatives/{initiative_id}/evidence")
+def initiative_evidence(initiative_id: str, payload: InitiativeEvidenceInput,
+                        _: None = Depends(verify_admin_password)) -> dict:
+    try:
+        return initiative_drive().review_evidence(initiative_id, source=constitutional_reviewer(), indicator=payload.indicator)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="initiative not found") from exc
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/initiatives/guardian-notification")
+def configure_initiative_notifications(payload: InitiativeNotificationInput,
+                                       _: None = Depends(verify_admin_password)) -> dict:
+    try:
+        return initiative_drive().configure_notifications(source=constitutional_reviewer(), enabled=payload.enabled,
+            chat_id=settings.telegram_allowed_chat_id)
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/initiatives/notification/reserve")
+def reserve_initiative_notification(_: None = Depends(verify_admin_password)) -> dict:
+    return {"notification": initiative_drive().reserve_notification(configured_chat_id=settings.telegram_allowed_chat_id)}
+
+
+@app.post("/initiatives/notification/result")
+def acknowledge_initiative_notification(payload: InitiativeDeliveryInput,
+                                       _: None = Depends(verify_admin_password)) -> dict:
+    try:
+        initiative_drive().acknowledge_notification(payload.reservation_id, delivered=payload.delivered)
+        return {"ok": True}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="reservation not found") from exc
 
 
 @app.get("/debug/governance")
 def debug_governance(_: None = Depends(verify_admin_password)) -> dict:
     return ava_governance().debug()
+
+
+class PermissionRequestInput(BaseModel):
+    capability_id: str = Field(max_length=100)
+    proposed_action: str = Field(min_length=1, max_length=4000)
+    reason: str = Field(min_length=1, max_length=4000)
+    expected_effect: str = Field(min_length=1, max_length=4000)
+    scope: str = Field(default="", max_length=4000)
+    risk_level: Literal["low", "medium", "high"] = "low"
+    requested_authorization: Literal["once", "scope"] = "once"
+
+
+class PermissionReviewInput(BaseModel):
+    decision: Literal["APPROVED_ONCE", "APPROVED_SCOPE", "DENIED", "CANCELLED"]
+
+
+@app.get("/governance/autonomy")
+def governance_autonomy(_: None = Depends(verify_admin_password)) -> dict:
+    governance = ava_governance()
+    return {**governance.developmental_debug(),
+            "capabilities": governance.snapshot["developmental"]["capabilities"]}
+
+
+class CapabilityGrantInput(BaseModel):
+    level: int = Field(ge=0, le=6)
+    scope: list[str] = Field(default_factory=list, max_length=100)
+
+
+class AutonomyProposalInput(BaseModel):
+    capability_id: str = Field(max_length=100)
+    proposed_level: int = Field(ge=1, le=6)
+    reason: str = Field(min_length=1, max_length=4000)
+
+
+class AutonomyReviewInput(BaseModel):
+    approve: bool
+    scope: list[str] = Field(default_factory=list, max_length=100)
+
+
+@app.put("/governance/autonomy/{capability_id}")
+def grant_capability_autonomy(capability_id: str, payload: CapabilityGrantInput,
+                             _: None = Depends(verify_admin_password)) -> dict:
+    try:
+        return ava_governance().set_capability_autonomy(capability_id, payload.level,
+            constitutional_reviewer(), scope=payload.scope)
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/governance/autonomy/proposals")
+def propose_capability_autonomy(payload: AutonomyProposalInput,
+                                _: None = Depends(verify_admin_password)) -> dict:
+    try:
+        return ava_governance().propose_autonomy_increase(payload.capability_id, payload.proposed_level, payload.reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/governance/autonomy/proposals/{proposal_id}/review")
+def review_capability_autonomy(proposal_id: str, payload: AutonomyReviewInput,
+                              _: None = Depends(verify_admin_password)) -> dict:
+    try:
+        return ava_governance().review_autonomy_proposal(proposal_id, constitutional_reviewer(),
+            approve=payload.approve, scope=payload.scope)
+    except StopIteration as exc:
+        raise HTTPException(status_code=404, detail="autonomy proposal not found") from exc
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/governance/relationships")
+def governance_relationships(_: None = Depends(verify_admin_password)) -> dict:
+    from avacore.governance.relationship import SocialRing
+    state = ava_governance().snapshot["developmental"]
+    return {"rings": {ring.value: ring.name for ring in SocialRing},
+            "entries": state["social_relationships"], "delegations": state["delegations"]}
+
+
+@app.get("/governance/permissions")
+def governance_permissions(_: None = Depends(verify_admin_password)) -> dict:
+    governance = ava_governance()
+    governance.developmental_debug()
+    from avacore.governance.permissions import timestamp, utc_now
+    return {"requests": [r for r in governance.snapshot["developmental"]["permissions"]
+                         if r["status"] == "PENDING" and (not r["expires_at"] or timestamp(r["expires_at"]) > utc_now())]}
+
+
+@app.post("/governance/permissions")
+def create_permission_request(payload: PermissionRequestInput, _: None = Depends(verify_admin_password)) -> dict:
+    # Testable preparation only: this endpoint never executes the described action.
+    try:
+        return ava_governance().request_permission(**payload.model_dump())
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/governance/permissions/{request_id}/review")
+def review_permission_request(request_id: str, payload: PermissionReviewInput,
+                              _: None = Depends(verify_admin_password)) -> dict:
+    try:
+        return ava_governance().review_permission(request_id, constitutional_reviewer(), decision=payload.decision)
+    except StopIteration as exc:
+        raise HTTPException(status_code=404, detail="permission request not found") from exc
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/debug/governance/principles")

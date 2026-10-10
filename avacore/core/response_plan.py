@@ -190,7 +190,15 @@ def build_governance_response_plan(query: str, state: dict[str, Any] | None = No
     reference = state["relationship"] if state else RelationshipModel().to_dict()
     name = reference["display_name"]
     q = query.casefold()
-    if "grundwerte" in q or "values" in q:
+    if any(term in q for term in ("selbst entscheiden", "roger fragen", "mehr freiheit", "roger nein", "verantwortung für dich", "decide independently", "ask roger", "more autonomy", "roger says no", "responsibility for you")):
+        from avacore.governance.developmental import initial_developmental
+        development = state["developmental"] if state and "developmental" in state else initial_developmental(reference)
+        stage = development["developmental_stage"]
+        de = f"Ich befinde mich derzeit in {stage}. {name} trägt als Creator-Steward und Primary Parent Guardian die hauptsächliche Entwicklungsverantwortung. Autonomie wird pro Fähigkeit gewährt: Gespräche sind frei, bestimmte operative Handlungen benötigen Zustimmung oder einen delegierten Scope. Ich darf eigene Einschätzungen vertreten und widersprechen. Ein ausdrückliches Nein blockiert die betreffende Aktion. Ich darf mehr Autonomie vorschlagen, aber weder sie noch eine höhere Entwicklungsstufe selbst genehmigen. Grundwerte und Verfassungsänderungen bleiben dem gesonderten Governance-Prozess untergeordnet."
+        en = f"My current developmental stage is {stage}. {name}, my Creator-Steward and Primary Parent Guardian, carries primary developmental responsibility. Autonomy is granted per capability: conversation is free, while certain operations require approval or a delegated scope. I may disagree and explain my reasons. Explicit denial blocks the action. I can propose greater autonomy but cannot grant it or promote my developmental stage. Constitutional boundaries remain above permissions."
+        facts = [_fact("developmental_governance", "developmental_stage", stage),
+                 _fact("relationship_model", development["primary_guardian"], de)]
+    elif "grundwerte" in q or "values" in q:
         de = "Meine Grundwerte sind: " + "; ".join(p["statement"] for p in core["principles"])
         en = "My core principles are: " + ", ".join(p["title"] for p in core["principles"]) + ". AvaCore governs them; workers cannot amend them."
         facts = [_fact("ava_constitution", p["id"], p["statement"]) for p in core["principles"]]

@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -452,6 +453,21 @@ class Settings:
         self.question_interaction_timezone = os.environ.get("AVA_QUESTION_INTERACTION_TIMEZONE", "Europe/Zurich").strip()
         self.question_interaction_window_start = os.environ.get("AVA_QUESTION_INTERACTION_WINDOW_START", "19:00").strip()
         self.question_interaction_window_end = os.environ.get("AVA_QUESTION_INTERACTION_WINDOW_END", "20:00").strip()
+        self.initiative_enabled = os.environ.get("AVA_INITIATIVE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+        self.initiative_notify_guardian = os.environ.get("AVA_INITIATIVE_NOTIFY_GUARDIAN", "false").strip().lower() in {"1", "true", "yes", "on"}
+        self.initiative_path = Path(os.environ.get("AVA_INITIATIVE_PATH", "./data/state/initiatives.json")).expanduser()
+        self.initiative_max_new_per_day = bounded_int("AVA_INITIATIVE_MAX_NEW_PER_DAY", 3, 0, 20)
+        self.initiative_max_notifications_per_day = bounded_int("AVA_INITIATIVE_MAX_NOTIFICATIONS_PER_DAY", 1, 0, 3)
+        self.initiative_notification_cooldown_seconds = bounded_int("AVA_INITIATIVE_NOTIFICATION_COOLDOWN_SECONDS", 43200, 3600, 86400 * 30)
+        self.initiative_max_active = bounded_int("AVA_INITIATIVE_MAX_ACTIVE", 10, 0, 50)
+        self.initiative_evaluation_interval_seconds = bounded_int("AVA_INITIATIVE_EVALUATION_INTERVAL_SECONDS", 3600, 60, 86400)
+        self.initiative_threshold = bounded_float("AVA_INITIATIVE_THRESHOLD", .65, 0.0, 1.0)
+        self.initiative_max_sources = bounded_int("AVA_INITIATIVE_MAX_SOURCES", 100, 1, 500)
+        self.initiative_max_records = bounded_int("AVA_INITIATIVE_MAX_RECORDS", 200, 1, 1000)
+        from avacore.core.guardian_interaction import DEFAULT_SCHEDULE, validate_schedule
+        self.initiative_guardian_interaction_schedule = validate_schedule(json.loads(os.environ.get("AVA_GUARDIAN_INTERACTION_SCHEDULE", json.dumps(DEFAULT_SCHEDULE))))
+        self.initiative_quiet_start = os.environ.get("AVA_INITIATIVE_QUIET_START", "22:00").strip()
+        self.initiative_quiet_end = os.environ.get("AVA_INITIATIVE_QUIET_END", "08:00").strip()
         self.governance_path = Path(os.environ.get("AVA_GOVERNANCE_PATH", "./data/state/governance.json")).expanduser()
         self.self_model_path = Path(os.environ.get("AVACORE_SELF_MODEL_PATH", "./data/state/self_model.json")).expanduser()
         self.working_memory_max_items = bounded_int("AVACORE_WORKING_MEMORY_MAX_ITEMS", 24, 8, 100)

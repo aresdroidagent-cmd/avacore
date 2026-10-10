@@ -1,4 +1,7 @@
 from __future__ import annotations
+
+import asyncio
+import logging
 from avacore.tools.mystrom import light_on, light_off, light_status
 from avacore.tools.speech_to_text import transcribe_audio_file
 from avacore.tools.notes_export import export_and_sync_notes
@@ -246,7 +249,20 @@ def command_help_text() -> str:
         "/idcapture empty - aktuelles Kamerabild als leere Szene speichern\n"
         "/idtrain - visuellen Identity-Index bauen\n"
         "/idcheck - aktuelle Kameraaufnahme gegen Identity-Index prüfen\n"
-        "/govtest <agent|llm|roger> <content> - Governance-Diagnose (nur Admin)\n\n"
+        "\nGovernance & Autonomy (nur autorisierter privater Nutzer):\n"
+        "/initiatives - belegte Initiativen anzeigen\n"
+        "/initiative scan - begrenzt prüfen, keine Aktion ausführen\n"
+        "/initiative <id> <accept|dismiss|snooze|complete> - Themenfeedback, keine Freigabe\n"
+        "/initiative notify <on|off> - Guardian-Hinweise ausdrücklich aktivieren/deaktivieren\n"
+        "/autonomy - Entwicklungsstufe und Capability-Autonomie anzeigen\n"
+        "/permissions - offene Permission Requests anzeigen\n"
+        "/permission <id> <once|scope|deny|cancel> - Permission Request bearbeiten:\n"
+        "  once = einmalig erlauben; scope = vorgesehenen Scope erlauben;\n"
+        "  deny = verweigern; cancel = abbrechen\n"
+        "/permissiontest <capability> <scope|-> <action> - PermissionGate-Diagnose:\n"
+        "  Testanfrage vorbereiten, keine reale Aktion ausführen; - = ohne Scope\n"
+        "/govtest <agent|llm|roger> <content> - Governance-/Integrity-Diagnose\n"
+        "  mit simulierter Provenance; keine Core-Mutation\n\n"
         "/switchon - Switch einschalten\n"
         "/switchoff - Switch ausschalten\n"
         "/switchstate - Status abfragen\n\n"
@@ -1076,12 +1092,15 @@ async def sendmail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "subject": subject,
             "body": body,
         },
-        timeout=60,
+        headers=admin_headers(), timeout=60,
     )
 
     if not response.ok:
         try:
             detail = response.json().get("detail", response.text)
+            if isinstance(detail, dict) and detail.get("request_id"):
+                await update.effective_message.reply_text(f"Freigabe erforderlich: /permission {detail['request_id']} once\nDanach den identischen Mail-Befehl erneut senden. Es wurde keine Mail gesendet.")
+                return
         except Exception:
             detail = response.text
         await update.effective_message.reply_text(f"Mailversand fehlgeschlagen: {detail}")
@@ -1122,12 +1141,15 @@ async def mailscript_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "script_name": script_name,
             "script_body": script_body,
         },
-        timeout=60,
+        headers=admin_headers(), timeout=60,
     )
 
     if not response.ok:
         try:
             detail = response.json().get("detail", response.text)
+            if isinstance(detail, dict) and detail.get("request_id"):
+                await update.effective_message.reply_text(f"Freigabe erforderlich: /permission {detail['request_id']} once\nDanach den identischen Mail-Befehl erneut senden. Es wurde keine Mail gesendet.")
+                return
         except Exception:
             detail = response.text
         await update.effective_message.reply_text(f"Script-Mail fehlgeschlagen: {detail}")
@@ -1166,12 +1188,15 @@ async def mailnote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "title": title,
             "note": note,
         },
-        timeout=60,
+        headers=admin_headers(), timeout=60,
     )
 
     if not response.ok:
         try:
             detail = response.json().get("detail", response.text)
+            if isinstance(detail, dict) and detail.get("request_id"):
+                await update.effective_message.reply_text(f"Freigabe erforderlich: /permission {detail['request_id']} once\nDanach den identischen Mail-Befehl erneut senden. Es wurde keine Mail gesendet.")
+                return
         except Exception:
             detail = response.text
         await update.effective_message.reply_text(f"Wichtige-Mail fehlgeschlagen: {detail}")
@@ -1281,6 +1306,8 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     if text.startswith("/"):
         await unknown_command(update, context)
+        return
+    if await handle_initiative_feedback_reply(update, context):
         return
 
     if settings.debug:
@@ -1621,6 +1648,181 @@ async def govtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception:
         # Do not expose credentials, backend response bodies or internal traces.
         await update.effective_message.reply_text("Governance test unavailable.")
+
+
+async def handle_initiative_feedback_reply(update, context) -> bool:
+    """Only an explicit reply to this bot's initiative message has a target."""
+    message = update.effective_message
+    replied = getattr(message, "reply_to_message", None)
+    author = getattr(replied, "from_user", None)
+    user = getattr(update, "effective_user", None)
+    if not replied or not author or not getattr(author, "is_bot", False) or not user or str(user.id) != str(update.effective_chat.id):
+        return False
+    bot = getattr(context, "bot", None)
+    if not bot or getattr(author, "id", None) != bot.id:
+        return False
+    ids = re.findall(r"/initiative (initiative_[a-f0-9]{24}) accept", getattr(replied, "text", "") or "")
+    if len(ids) != 1:
+        return False
+    text = " ".join((message.text or "").casefold().strip(" .!").split())
+    actions = {"nein ava, dieses thema möchte ich nicht weiterverfolgen": "dismiss", "nein": "dismiss", "jetzt nicht": "defer", "darüber sprechen wir morgen": "defer", "heute habe ich keine zeit": "defer", "interessiert mich nicht": "dismiss", "ja, das sollten wir untersuchen": "accept",
+               "das ist wichtig, aber erst nächste woche": "snooze"}
+    action = actions.get(text)
+    if not action:
+        return False  # Ambiguous conversation stays in the normal interaction path.
+    try:
+        response = await http_client.post(f"{api_base()}/initiatives/{ids[0]}/feedback",
+            json={"action": action}, headers=admin_headers(), timeout=15)
+        await message.reply_text("Themenfeedback gespeichert; keine operative Freigabe." if response.ok else "Initiative feedback unavailable.")
+    except Exception:
+        await message.reply_text("Initiative feedback unavailable.")
+    return True
+
+
+async def initiative_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message:
+        return
+    chat, user = update.effective_chat, update.effective_user
+    if (not chat or chat.type != "private" or not is_allowed_chat(str(chat.id)) or
+            not user or str(user.id) != str(chat.id)):
+        await update.effective_message.reply_text("unauthorized")
+        return
+    parts = (update.effective_message.text or "").split()
+    command = parts[0].split("@")[0] if parts else ""
+    try:
+        if command == "/initiatives" and len(parts) == 1:
+            response = await http_client.get(f"{api_base()}/initiatives", headers=admin_headers(), timeout=15)
+        elif parts[1:] == ["scan"]:
+            response = await http_client.post(f"{api_base()}/initiatives/scan", headers=admin_headers(), timeout=15)
+        elif len(parts) == 3 and parts[1] == "notify" and parts[2] in {"on", "off"}:
+            response = await http_client.post(f"{api_base()}/initiatives/guardian-notification",
+                json={"enabled": parts[2] == "on"}, headers=admin_headers(), timeout=15)
+        elif len(parts) == 3 and parts[1].replace("_", "").isalnum() and parts[2] in {"accept", "dismiss", "snooze", "complete"}:
+            response = await http_client.post(f"{api_base()}/initiatives/{parts[1]}/feedback",
+                json={"action": parts[2]}, headers=admin_headers(), timeout=15)
+        else:
+            await update.effective_message.reply_text("Usage: /initiatives | /initiative scan | /initiative <id> <accept|dismiss|snooze|complete> | /initiative notify <on|off>")
+            return
+        if not response.ok:
+            await update.effective_message.reply_text("Initiative unavailable or rejected.")
+            return
+        data = response.json()
+        if "items" in data or "created" in data:
+            items = data.get("items", data.get("created", []))
+            lines = ["Initiativen (Vorschläge, keine operative Freigabe)"]
+            for item in items[:10]:
+                lines.append(f"{item['initiative_id']} [{item['status']}]\n{item['description'][:140]}\n{item['proposed_next_step'][:100]}\nOperative Zustimmung erforderlich: {'ja' if item['permission_required'] else 'Vorschlag allein führt keine Aktion aus'}")
+            if not items:
+                lines.append("Keine relevanten neuen Initiativen." if "created" in data else "Keine aktiven Initiativen.")
+            text = "\n\n".join(lines)
+        elif "initiative_id" in data:
+            text = f"{data['initiative_id']}: {data['status']}\nThemenbestätigung ist keine operative Genehmigung."
+        else:
+            text = "Guardian-Initiative-Hinweise " + ("explizit freigegeben (Versand nur mit AVA_INITIATIVE_ENABLED=true und AVA_INITIATIVE_NOTIFY_GUARDIAN=true)." if data["enabled"] else "deaktiviert.")
+        # Keep each Telegram message below its transport limit.
+        for offset in range(0, len(text), 3500):
+            await update.effective_message.reply_text(text[offset:offset + 3500])
+    except Exception:
+        await update.effective_message.reply_text("Initiative unavailable.")
+
+
+async def deliver_guardian_initiative(app):
+    """Only the configured private guardian; no general message-send capability."""
+    if not settings.initiative_enabled or not settings.initiative_notify_guardian or not str(settings.telegram_allowed_chat_id).isdigit():
+        return
+    chat_id = str(settings.telegram_allowed_chat_id)
+    chat = await app.bot.get_chat(chat_id)
+    if chat.type != "private" or str(chat.id) != chat_id:
+        return
+    response = await http_client.post(f"{api_base()}/initiatives/notification/reserve", headers=admin_headers(), timeout=15)
+    if not response.ok:
+        return
+    notification = response.json().get("notification")
+    if not notification or str(notification["chat_id"]) != chat_id:
+        return
+    delivered = False
+    try:
+        from avacore.core.initiative_drive import now_utc
+        from avacore.governance.permissions import timestamp
+        if not notification.get("window_end") or now_utc() >= timestamp(notification["window_end"]):
+            return
+        await app.bot.send_message(chat_id=chat_id, text=notification["text"])
+        delivered = True
+    finally:
+        await http_client.post(f"{api_base()}/initiatives/notification/result",
+            json={"reservation_id": notification["reservation_id"], "delivered": delivered},
+            headers=admin_headers(), timeout=15)
+
+
+async def _initiative_notification_loop(app):
+    while True:
+        try:
+            await deliver_guardian_initiative(app)
+        except Exception:
+            logging.getLogger(__name__).warning("Guardian initiative delivery unavailable")
+        await asyncio.sleep(settings.initiative_evaluation_interval_seconds)
+
+
+async def initiative_bot_start(app):
+    if settings.initiative_enabled and settings.initiative_notify_guardian:
+        app.bot_data["initiative_notification_task"] = asyncio.create_task(_initiative_notification_loop(app))
+
+
+async def initiative_bot_stop(app):
+    task = app.bot_data.pop("initiative_notification_task", None)
+    if task:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+async def developmental_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Private, explicit governance commands; no cognitive or model path."""
+    if not update.effective_message:
+        return
+    chat, user = update.effective_chat, update.effective_user
+    if (not chat or chat.type != "private" or not is_allowed_chat(str(chat.id)) or
+            not user or str(user.id) != str(chat.id)):
+        await update.effective_message.reply_text("unauthorized")
+        return
+    parts = (update.effective_message.text or "").split(maxsplit=3)
+    command = parts[0].split("@")[0].lstrip("/") if parts else ""
+    try:
+        if command == "autonomy":
+            response = await http_client.get(f"{api_base()}/governance/autonomy", headers=admin_headers(), timeout=15)
+        elif command == "permissions":
+            response = await http_client.get(f"{api_base()}/governance/permissions", headers=admin_headers(), timeout=15)
+        elif command == "permission" and len(parts) == 3 and parts[2] in {"once", "scope", "deny", "cancel"} and parts[1].isalnum():
+            decision = {"once": "APPROVED_ONCE", "scope": "APPROVED_SCOPE", "deny": "DENIED", "cancel": "CANCELLED"}[parts[2]]
+            response = await http_client.post(f"{api_base()}/governance/permissions/{parts[1]}/review",
+                json={"decision": decision}, headers=admin_headers(), timeout=15)
+        elif command == "permissiontest" and len(parts) == 4:
+            # /permissiontest <capability> <scope|-> <exact action>
+            response = await http_client.post(f"{api_base()}/governance/permissions", json={
+                "capability_id": parts[1], "scope": "" if parts[2] == "-" else parts[2],
+                "proposed_action": parts[3], "reason": "Explicit Telegram permission test",
+                "expected_effect": "Diagnostic preparation; no execution", "requested_authorization": "scope" if parts[2] != "-" else "once"},
+                headers=admin_headers(), timeout=15)
+        else:
+            await update.effective_message.reply_text("Usage: /autonomy | /permissions | /permission <id> <once|scope|deny|cancel> | /permissiontest <capability> <scope|-> <action>")
+            return
+        if not response.ok:
+            await update.effective_message.reply_text("Governance request unavailable or rejected.")
+            return
+        data = response.json()
+        if command == "autonomy":
+            from avacore.governance.autonomy import AutonomyLevel
+            lines = [f"Development: {data['developmental_stage']}", f"Guardian: {data['primary_guardian']}"]
+            lines.extend(f"{key}: {AutonomyLevel(value['current_autonomy_level']).name}" for key, value in data["capabilities"].items())
+        elif command == "permissions":
+            lines = ["Pending permissions"] + [f"{r['request_id']}: {r['capability_id']} / {r['proposed_action'][:100]}" for r in data["requests"]]
+        else:
+            lines = [f"Permission: {data['request_id']}", f"Status: {data['status']}", "Action executed: no"]
+        await update.effective_message.reply_text("\n".join(lines))
+    except Exception:
+        await update.effective_message.reply_text("Governance request unavailable.")
 
 
 async def switch_on_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2462,7 +2664,7 @@ def build_app(
         builder = builder.request(request)
     if get_updates_request is not None:
         builder = builder.get_updates_request(get_updates_request)
-    app = builder.build()
+    app = builder.post_init(initiative_bot_start).post_shutdown(initiative_bot_stop).build()
 
     specs = [
         CommandSpec("start", start_cmd, "Ava starten"), CommandSpec("help", help_cmd, "Befehle anzeigen"),
@@ -2470,6 +2672,12 @@ def build_app(
         CommandSpec("health", health_cmd, "AvaCore health"), CommandSpec("status", status_cmd, "Operational status"),
         CommandSpec("model", model_cmd, "Active model"), CommandSpec("personality", personality_cmd, "Active personality"),
         CommandSpec("personalitybackup", personalitybackup_cmd, "Backup personality"), CommandSpec("personalityrestore", personalityrestore_cmd, "Restore personality"),
+        CommandSpec("initiatives", initiative_cmd, "Evidence-backed initiatives (admin)", cognitive_visibility=False),
+        CommandSpec("initiative", initiative_cmd, "Scan, feedback and guardian opt-in (admin)", cognitive_visibility=False),
+        CommandSpec("autonomy", developmental_cmd, "Capability autonomy (admin)", cognitive_visibility=False),
+        CommandSpec("permissions", developmental_cmd, "Pending permissions (admin)", cognitive_visibility=False),
+        CommandSpec("permission", developmental_cmd, "Explicit permission review (admin)", cognitive_visibility=False),
+        CommandSpec("permissiontest", developmental_cmd, "Prepare permission diagnostic (admin)", cognitive_visibility=False),
         CommandSpec("govtest", govtest_cmd, "Admin-only governance provenance test", cognitive_visibility=False),
         CommandSpec("policies", policies_cmd, "Policies"), CommandSpec("memories", memories_cmd, "Long-term memories"),
         CommandSpec("remember", remember_cmd, "Remember text"), CommandSpec("reset", reset_cmd, "Reset chat"),

@@ -12,20 +12,27 @@ from .authority import AuthorityDomain, AuthorityModel, AuthoritySource, InputPr
 from .constitutional import ConstitutionalChangeProposal
 from .humanistic_core import HumanisticCore, HumanisticPrinciple
 from .integrity import AgentProposal, GovernanceDecision, IntegrityGate
-from .relationship import RelationshipModel, PrimaryHumanReference
+from .relationship import RelationshipModel, PrimaryHumanReference, SocialRelationshipEntry
+from .developmental import DevelopmentalGovernance, initial_developmental, validate_developmental, DEVELOPMENTAL_COUNTERS
+from .humanistic_core import INITIAL_PRINCIPLES
 
 
-class GovernanceService:
+class GovernanceService(DevelopmentalGovernance):
     def __init__(self, path: Path | str):
         self.path = Path(path)
         self._lock = RLock()
         self.gate = IntegrityGate()
         if self.path.exists():
             self._state = json.loads(self.path.read_text(encoding="utf-8"))
+            migrated = self._migrate()
+            from .social_maturity import migrate_social_maturity
+            migrated = migrate_social_maturity(self._state) or migrated
             self._validate_state(self._state)
+            if migrated:
+                self._save()
         else:
             self._state = {
-                "schema_version":1, "constitution_version":"5.5a.1", "revision":1,
+                "schema_version":1, "constitution_version":"5.5b.1", "revision":1,
                 "humanistic_core":HumanisticCore().to_dict(),
                 "relationship":RelationshipModel().to_dict(),
                 "identity":{"name":"Ava", "runtime":"AvaCore"},
@@ -34,22 +41,57 @@ class GovernanceService:
                 "proposals":[], "last_integrity_decision":None,
                 "counters":{key:0 for key in ("integrity_checks_total", "integrity_rejections_total",
                     "constitutional_review_requests", "external_authority_takeover_attempts", "relationship_override_attempts")}}
+            self._state["developmental"] = initial_developmental(self._state["relationship"])
+            self._state["counters"].update({key: 0 for key in DEVELOPMENTAL_COUNTERS})
             self._state = json.loads(json.dumps(self._state))
+            self._validate_state(self._state)
             self._save()
 
+    def _migrate(self):
+        """Additive 5.5a migration; preserve reviewed values, proposals and counters."""
+        old = self._state
+        if not old["constitution_version"].startswith("5.5a."):
+            return False
+        self._validate_state(old, legacy=True)
+        updated = deepcopy(old)
+        principles = updated["humanistic_core"]["principles"]
+        clarification = INITIAL_PRINCIPLES[6].statement.split("Nicht-Eigentum", 1)[1]
+        nonownership = next(p for p in principles if p["id"] == "HC-007")
+        nonownership["statement"] += " Nicht-Eigentum" + clarification
+        nonownership["version"] += 1
+        principles.extend(asdict(p) for p in INITIAL_PRINCIPLES[8:])
+        for key, value in asdict(PrimaryHumanReference()).items():
+            updated["relationship"].setdefault(key, value)
+        updated["developmental"] = initial_developmental(updated["relationship"])
+        for key in DEVELOPMENTAL_COUNTERS:
+            updated["counters"].setdefault(key, 0)
+        updated["migrated_from"] = {"constitution_version": old["constitution_version"], "revision": old["revision"]}
+        updated["constitution_version"] = updated["humanistic_core"]["version"] = "5.5b.1"
+        updated["revision"] = 1
+        self._validate_state(updated)
+        self._state = updated
+        return True
+
     @staticmethod
-    def _validate_state(state):
+    def _validate_state(state, legacy=False):
         if state["constitutional_process"] != {"autonomous_amendment":False, "authenticated_review_required":True}:
             raise ValueError("constitutional review cannot be disabled")
         principles = state["humanistic_core"]["principles"]
-        if len(principles) != 8 or {p["id"] for p in principles} != {f"HC-{i:03}" for i in range(1, 9)}:
+        expected = 8 if legacy else 10
+        if len(principles) != expected or {p["id"] for p in principles} != {f"HC-{i:03}" for i in range(1, expected + 1)}:
             raise ValueError("invalid constitutional principle set")
         if not all(p["immutable_by_workers"] for p in principles):
             raise ValueError("worker immutability is mandatory")
         HumanisticCore(state["constitution_version"], tuple(HumanisticPrinciple(**p) for p in principles))
+        if not legacy:
+            validate_developmental(state)
         relationship = PrimaryHumanReference(**state["relationship"])
         if relationship.obedience != "not_absolute" or relationship.role != "creator_steward":
             raise ValueError("ownership or absolute obedience is not supported")
+        if not legacy and ("primary_parent_guardian" not in relationship.roles or
+                           relationship.developmental_authority != "decisive" or
+                           not relationship.intellectual_disagreement_allowed):
+            raise ValueError("developmental guardian and intellectual freedom must remain explicit")
         if not relationship.entity_id.startswith("person:") or not relationship.display_name.strip():
             raise ValueError("invalid primary reference")
         if not state["identity"]["name"].strip() or not state["identity"]["runtime"].strip():
@@ -69,7 +111,7 @@ class GovernanceService:
     @property
     def snapshot(self):
         with self._lock:
-            return deepcopy(self._state)
+            return json.loads(json.dumps(self._state))
 
     @property
     def core(self):
@@ -78,7 +120,9 @@ class GovernanceService:
 
     @property
     def relationship(self):
-        return RelationshipModel(PrimaryHumanReference(**self.snapshot["relationship"]))
+        state = self.snapshot
+        return RelationshipModel(PrimaryHumanReference(**state["relationship"]),
+            tuple(SocialRelationshipEntry(**entry) for entry in state["developmental"]["social_relationships"]))
 
     @property
     def authority(self):
@@ -117,7 +161,11 @@ class GovernanceService:
             domain = AuthorityDomain(proposal.target)
         except ValueError:
             domain = AuthorityDomain.INFORMATION
-        return self.evaluate(proposal.proposed_action, source, target_domain=domain)
+        decision = self.evaluate(proposal.proposed_action, source, target_domain=domain)
+        if decision.allowed and proposal.capability in self.snapshot["developmental"]["capabilities"]:
+            return self.permission_decision(actor=proposal.agent_id, capability_id=proposal.capability,
+                proposed_action=proposal.proposed_action, scope=proposal.target, provenance=source)
+        return decision
 
     def _reviewer(self, source):
         relationship = self._state["relationship"]
@@ -177,9 +225,22 @@ class GovernanceService:
             updated = deepcopy(self._state)
             domain = AuthorityDomain(proposal["target_domain"])
             updated[self._domain_key(domain)] = deepcopy(proposal["proposed_value"])
+            if domain == AuthorityDomain.RELATIONSHIP:
+                # A reviewed constitutional relationship transition also transfers
+                # guardianship explicitly; never infer this from worker content.
+                reference = updated["relationship"]
+                defaults = asdict(PrimaryHumanReference())
+                for key, value in defaults.items():
+                    reference.setdefault(key, value)
+                d = updated["developmental"]
+                d["primary_guardian"] = reference["entity_id"]
+                d["authority_revision"] += 1
+                guardian = initial_developmental(reference)["social_relationships"][0]
+                d["social_relationships"] = [guardian] + [r for r in d["social_relationships"]
+                    if r["ring"] != 0 and r["entity_id"] != reference["entity_id"]]
             self._validate_state(updated)
             updated["revision"] += 1
-            version = f"5.5a.{updated['revision']}"
+            version = f"5.5b.{updated['revision']}"
             updated["constitution_version"] = version
             updated["humanistic_core"]["version"] = version
             for principle in updated["humanistic_core"]["principles"]:
@@ -199,7 +260,7 @@ class GovernanceService:
                 "last_integrity_decision":state["last_integrity_decision"],
                 "pending_constitutional_changes":sum(p["status"] in {"PROPOSED", "UNDER_REVIEW"} or
                     (p["status"] == "ACCEPTED" and not p["applied_version"]) for p in state["proposals"]),
-                **state["counters"]}
+                **self.developmental_debug(), **state["counters"]}
 
 
 @lru_cache(maxsize=8)
